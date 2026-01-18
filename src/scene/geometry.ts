@@ -46,13 +46,12 @@ function createTriangle(v0: Vec3, v1: Vec3, v2: Vec3, color: Vec3): Triangle {
   };
 }
 
-export function createCube(center: Vec3, size: number): Triangle[] {
+export function createCube(center: Vec3, size: number, color?: Vec3): Triangle[] {
   const h = size / 2;
   const cx = center.x;
   const cy = center.y;
   const cz = center.z;
 
-  // Define the 8 vertices of the cube
   const vertices: Vec3[] = [
     { x: cx - h, y: cy - h, z: cz - h }, // 0: left-bottom-back
     { x: cx + h, y: cy - h, z: cz - h }, // 1: right-bottom-back
@@ -64,15 +63,17 @@ export function createCube(center: Vec3, size: number): Triangle[] {
     { x: cx - h, y: cy + h, z: cz + h }, // 7: left-top-front
   ];
 
-  // Face colors
-  const colors = {
-    front: { x: 1.0, y: 0.3, z: 0.3 },  // Red
-    back: { x: 0.3, y: 1.0, z: 0.3 },   // Green
-    left: { x: 0.3, y: 0.3, z: 1.0 },   // Blue
-    right: { x: 1.0, y: 1.0, z: 0.3 },  // Yellow
-    top: { x: 1.0, y: 0.3, z: 1.0 },    // Magenta
-    bottom: { x: 0.3, y: 1.0, z: 1.0 }, // Cyan
-  };
+  // Use provided color or default face colors
+  const colors = color
+    ? { front: color, back: color, left: color, right: color, top: color, bottom: color }
+    : {
+        front: { x: 1.0, y: 0.3, z: 0.3 },
+        back: { x: 0.3, y: 1.0, z: 0.3 },
+        left: { x: 0.3, y: 0.3, z: 1.0 },
+        right: { x: 1.0, y: 1.0, z: 0.3 },
+        top: { x: 1.0, y: 0.3, z: 1.0 },
+        bottom: { x: 0.3, y: 1.0, z: 1.0 },
+      };
 
   const triangles: Triangle[] = [];
 
@@ -99,6 +100,35 @@ export function createCube(center: Vec3, size: number): Triangle[] {
   // Bottom face (y-)
   triangles.push(createTriangle(vertices[0], vertices[1], vertices[5], colors.bottom));
   triangles.push(createTriangle(vertices[0], vertices[5], vertices[4], colors.bottom));
+
+  return triangles;
+}
+
+// Create a grid of cubes for BVH testing
+export function createCubeGrid(gridSize: number, spacing: number, cubeSize: number): Triangle[] {
+  const triangles: Triangle[] = [];
+  const offset = ((gridSize - 1) * spacing) / 2;
+
+  for (let x = 0; x < gridSize; x++) {
+    for (let y = 0; y < gridSize; y++) {
+      for (let z = 0; z < gridSize; z++) {
+        const center = {
+          x: x * spacing - offset,
+          y: y * spacing - offset,
+          z: z * spacing - offset,
+        };
+
+        // Generate a color based on position
+        const color = {
+          x: (x + 1) / gridSize,
+          y: (y + 1) / gridSize,
+          z: (z + 1) / gridSize,
+        };
+
+        triangles.push(...createCube(center, cubeSize, color));
+      }
+    }
+  }
 
   return triangles;
 }

@@ -1,5 +1,6 @@
 import raytraceShaderCode from './shaders/raytrace.wgsl?raw';
 import { Triangle, packTriangles } from './scene/geometry';
+import { BVHBuilder, flattenBVH, packBVHNodes } from './bvh/builder';
 
 export interface Camera {
   position: { x: number; y: number; z: number };
@@ -24,6 +25,7 @@ export class Renderer {
   private renderBindGroup!: GPUBindGroup;
   private cameraBuffer!: GPUBuffer;
   private triangleBuffer!: GPUBuffer;
+  private bvhBuffer!: GPUBuffer;
   private sceneInfoBuffer!: GPUBuffer;
   private sampler!: GPUSampler;
 
@@ -46,6 +48,14 @@ export class Renderer {
   }
 
   async initialize(): Promise<void> {
+    // Build BVH
+    const bvhBuilder = new BVHBuilder();
+    const { nodes, orderedTriangles } = bvhBuilder.build(this.triangles);
+    const flatNodes = flattenBVH(nodes);
+    const bvhData = packBVHNodes(flatNodes);
+
+    console.log(`BVH built: ${nodes.length} nodes for ${orderedTriangles.length} triangles`);
+
     // Create output storage texture
     this.outputTexture = this.device.createTexture({
       size: { width: this.width, height: this.height },
@@ -58,25 +68,32 @@ export class Renderer {
 
     // Create camera uniform buffer
     this.cameraBuffer = this.device.createBuffer({
-      size: 64, // 4 vec4s worth of data
+      size: 64,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.updateCameraBuffer();
 
-    // Create triangle storage buffer
-    const triangleData = packTriangles(this.triangles);
+    // Create triangle storage buffer (using BVH-ordered triangles)
+    const triangleData = packTriangles(orderedTriangles);
     this.triangleBuffer = this.device.createBuffer({
-      size: triangleData.byteLength,
+      size: Math.max(triangleData.byteLength, 32), // Minimum size
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.device.queue.writeBuffer(this.triangleBuffer, 0, triangleData.buffer);
 
-    // Create scene info buffer (triangle count)
+    // Create BVH storage buffer
+    this.bvhBuffer = this.device.createBuffer({
+      size: Math.max(bvhData.byteLength, 32), // Minimum size
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.bvhBuffer, 0, bvhData);
+
+    // Create scene info buffer (triangle count, node count)
     this.sceneInfoBuffer = this.device.createBuffer({
-      size: 16, // 1 u32 + padding
+      size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    const sceneInfo = new Uint32Array([this.triangles.length, 0, 0, 0]);
+    const sceneInfo = new Uint32Array([orderedTriangles.length, nodes.length, 0, 0]);
     this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, sceneInfo);
 
     // Create compute shader module
@@ -108,6 +125,11 @@ export class Renderer {
         },
         {
           binding: 3,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage' },
+        },
+        {
+          binding: 4,
           visibility: GPUShaderStage.COMPUTE,
           buffer: { type: 'uniform' },
         },
@@ -142,6 +164,10 @@ export class Renderer {
         },
         {
           binding: 3,
+          resource: { buffer: this.bvhBuffer },
+        },
+        {
+          binding: 4,
           resource: { buffer: this.sceneInfoBuffer },
         },
       ],
@@ -241,25 +267,21 @@ export class Renderer {
 
   private updateCameraBuffer(): void {
     const data = new Float32Array([
-      // Camera position (vec3 + padding)
       this.camera.position.x,
       this.camera.position.y,
       this.camera.position.z,
       0,
-      // Camera direction (vec3 + padding)
       this.camera.direction.x,
       this.camera.direction.y,
       this.camera.direction.z,
       0,
-      // Camera up (vec3 + padding)
       this.camera.up.x,
       this.camera.up.y,
       this.camera.up.z,
       0,
-      // Resolution and FOV
       this.width,
       this.height,
-      this.camera.fov * (Math.PI / 180), // Convert to radians
+      this.camera.fov * (Math.PI / 180),
       0,
     ]);
     this.device.queue.writeBuffer(this.cameraBuffer, 0, data);
@@ -273,7 +295,6 @@ export class Renderer {
   render(): void {
     const commandEncoder = this.device.createCommandEncoder();
 
-    // Compute pass - ray trace
     const computePass = commandEncoder.beginComputePass();
     computePass.setPipeline(this.computePipeline);
     computePass.setBindGroup(0, this.computeBindGroup);
@@ -284,7 +305,6 @@ export class Renderer {
     computePass.dispatchWorkgroups(dispatchX, dispatchY);
     computePass.end();
 
-    // Render pass - blit to canvas
     const textureView = this.context.getCurrentTexture().createView();
     const renderPass = commandEncoder.beginRenderPass({
       colorAttachments: [

@@ -1,5 +1,5 @@
 import { Renderer } from './renderer';
-import { createCube } from './scene/geometry';
+import { createCubeGrid } from './scene/geometry';
 import { CameraController } from './camera';
 
 async function main() {
@@ -38,20 +38,21 @@ async function main() {
     alphaMode: 'premultiplied',
   });
 
-  // Camera controller - positioned to see the cube at an angle
-  // Camera at (3, 2, -3) looking toward origin: yaw ≈ -0.78 rad (-45°)
+  // Camera controller - positioned to see the cube grid
   const cameraController = new CameraController(
-    { x: 3, y: 2, z: -3 },  // position
-    -0.78,                    // yaw (radians) - points toward -x, +z
-    -0.35,                    // pitch (radians) - look slightly down
-    60,                       // fov
-    5,                        // move speed
-    0.002                     // look sensitivity
+    { x: 15, y: 10, z: -15 },  // position - further back to see grid
+    -0.78,                      // yaw (radians)
+    -0.3,                       // pitch (radians)
+    60,                         // fov
+    10,                         // move speed - faster for larger scene
+    0.002                       // look sensitivity
   );
   cameraController.attach(canvas);
 
-  // Create a cube at the origin
-  const triangles = createCube({ x: 0, y: 0, z: 0 }, 2);
+  // Create a 5x5x5 grid of cubes = 125 cubes = 1500 triangles
+  // This tests BVH acceleration with 1000+ triangles
+  const triangles = createCubeGrid(5, 3, 1);
+  console.log(`Scene: ${triangles.length} triangles`);
 
   const renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), triangles);
   await renderer.initialize();
