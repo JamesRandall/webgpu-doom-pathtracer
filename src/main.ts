@@ -1,5 +1,5 @@
 import { Renderer } from './renderer';
-import { createCubeGrid } from './scene/geometry';
+import { createCornellBox } from './scene/geometry';
 import { CameraController } from './camera';
 
 async function main() {
@@ -38,20 +38,19 @@ async function main() {
     alphaMode: 'premultiplied',
   });
 
-  // Camera controller - positioned to see the cube grid
+  // Camera inside the Cornell box, looking at back wall
   const cameraController = new CameraController(
-    { x: 15, y: 10, z: -15 },  // position - further back to see grid
-    -0.78,                      // yaw (radians)
-    -0.3,                       // pitch (radians)
+    { x: 0, y: 0, z: -4.5 },  // position near front of box
+    0,                          // yaw (looking +z toward back wall)
+    0,                          // pitch
     60,                         // fov
-    10,                         // move speed - faster for larger scene
+    3,                          // move speed
     0.002                       // look sensitivity
   );
   cameraController.attach(canvas);
 
-  // Create a 5x5x5 grid of cubes = 125 cubes = 1500 triangles
-  // This tests BVH acceleration with 1000+ triangles
-  const triangles = createCubeGrid(5, 3, 1);
+  // Create Cornell box scene
+  const triangles = createCornellBox();
   console.log(`Scene: ${triangles.length} triangles`);
 
   const renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), triangles);

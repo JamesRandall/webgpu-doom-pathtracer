@@ -17,10 +17,14 @@ export class Renderer {
   private height: number;
   private camera: Camera;
   private triangles: Triangle[];
+  private frameCount: number = 0;
+  private nodeCount: number = 0;
+  private triangleCount: number = 0;
 
   private computePipeline!: GPUComputePipeline;
   private renderPipeline!: GPURenderPipeline;
   private outputTexture!: GPUTexture;
+  private accumulationTexture!: GPUTexture;
   private computeBindGroup!: GPUBindGroup;
   private renderBindGroup!: GPUBindGroup;
   private cameraBuffer!: GPUBuffer;
@@ -28,6 +32,8 @@ export class Renderer {
   private bvhBuffer!: GPUBuffer;
   private sceneInfoBuffer!: GPUBuffer;
   private sampler!: GPUSampler;
+  private lastCameraPosition = { x: 0, y: 0, z: 0 };
+  private lastCameraDirection = { x: 0, y: 0, z: 1 };
 
   constructor(
     device: GPUDevice,
@@ -54,16 +60,29 @@ export class Renderer {
     const flatNodes = flattenBVH(nodes);
     const bvhData = packBVHNodes(flatNodes);
 
+    this.nodeCount = nodes.length;
+    this.triangleCount = orderedTriangles.length;
+
     console.log(`BVH built: ${nodes.length} nodes for ${orderedTriangles.length} triangles`);
 
     // Create output storage texture
     this.outputTexture = this.device.createTexture({
       size: { width: this.width, height: this.height },
-      format: 'rgba8unorm',
+      format: 'rgba16float',
       usage:
         GPUTextureUsage.STORAGE_BINDING |
         GPUTextureUsage.TEXTURE_BINDING |
         GPUTextureUsage.COPY_SRC,
+    });
+
+    // Create accumulation texture for temporal averaging
+    this.accumulationTexture = this.device.createTexture({
+      size: { width: this.width, height: this.height },
+      format: 'rgba16float',
+      usage:
+        GPUTextureUsage.STORAGE_BINDING |
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST,
     });
 
     // Create camera uniform buffer
@@ -76,25 +95,24 @@ export class Renderer {
     // Create triangle storage buffer (using BVH-ordered triangles)
     const triangleData = packTriangles(orderedTriangles);
     this.triangleBuffer = this.device.createBuffer({
-      size: Math.max(triangleData.byteLength, 32), // Minimum size
+      size: Math.max(triangleData.byteLength, 32),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.device.queue.writeBuffer(this.triangleBuffer, 0, triangleData.buffer);
 
     // Create BVH storage buffer
     this.bvhBuffer = this.device.createBuffer({
-      size: Math.max(bvhData.byteLength, 32), // Minimum size
+      size: Math.max(bvhData.byteLength, 32),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.device.queue.writeBuffer(this.bvhBuffer, 0, bvhData);
 
-    // Create scene info buffer (triangle count, node count)
+    // Create scene info buffer (triangle count, node count, frame, bounces)
     this.sceneInfoBuffer = this.device.createBuffer({
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    const sceneInfo = new Uint32Array([orderedTriangles.length, nodes.length, 0, 0]);
-    this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, sceneInfo);
+    this.updateSceneInfoBuffer();
 
     // Create compute shader module
     const computeShaderModule = this.device.createShaderModule({
@@ -109,7 +127,7 @@ export class Renderer {
           visibility: GPUShaderStage.COMPUTE,
           storageTexture: {
             access: 'write-only',
-            format: 'rgba8unorm',
+            format: 'rgba16float',
             viewDimension: '2d',
           },
         },
@@ -132,6 +150,11 @@ export class Renderer {
           binding: 4,
           visibility: GPUShaderStage.COMPUTE,
           buffer: { type: 'uniform' },
+        },
+        {
+          binding: 5,
+          visibility: GPUShaderStage.COMPUTE,
+          texture: { sampleType: 'float', viewDimension: '2d' },
         },
       ],
     });
@@ -170,6 +193,10 @@ export class Renderer {
           binding: 4,
           resource: { buffer: this.sceneInfoBuffer },
         },
+        {
+          binding: 5,
+          resource: this.accumulationTexture.createView(),
+        },
       ],
     });
 
@@ -192,7 +219,6 @@ export class Renderer {
 
         @vertex
         fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
-          // Full-screen triangle
           var positions = array<vec2f, 3>(
             vec2f(-1.0, -1.0),
             vec2f(3.0, -1.0),
@@ -212,7 +238,11 @@ export class Renderer {
 
         @fragment
         fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
-          return textureSample(outputTex, outputSampler, uv);
+          let color = textureSample(outputTex, outputSampler, uv).rgb;
+          // Simple tone mapping (Reinhard) and gamma correction
+          let mapped = color / (color + vec3f(1.0));
+          let gamma_corrected = pow(mapped, vec3f(1.0 / 2.2));
+          return vec4f(gamma_corrected, 1.0);
         }
       `,
     });
@@ -287,12 +317,42 @@ export class Renderer {
     this.device.queue.writeBuffer(this.cameraBuffer, 0, data);
   }
 
+  private updateSceneInfoBuffer(): void {
+    const sceneInfo = new Uint32Array([
+      this.triangleCount,
+      this.nodeCount,
+      this.frameCount,
+      4, // max bounces
+    ]);
+    this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, sceneInfo);
+  }
+
   updateCamera(camera: Camera): void {
+    // Check if camera moved - reset accumulation if so
+    const posChanged =
+      Math.abs(camera.position.x - this.lastCameraPosition.x) > 0.0001 ||
+      Math.abs(camera.position.y - this.lastCameraPosition.y) > 0.0001 ||
+      Math.abs(camera.position.z - this.lastCameraPosition.z) > 0.0001;
+    const dirChanged =
+      Math.abs(camera.direction.x - this.lastCameraDirection.x) > 0.0001 ||
+      Math.abs(camera.direction.y - this.lastCameraDirection.y) > 0.0001 ||
+      Math.abs(camera.direction.z - this.lastCameraDirection.z) > 0.0001;
+
+    if (posChanged || dirChanged) {
+      this.frameCount = 0;
+      this.lastCameraPosition = { ...camera.position };
+      this.lastCameraDirection = { ...camera.direction };
+    }
+
     this.camera = camera;
     this.updateCameraBuffer();
   }
 
   render(): void {
+    // Update frame counter for RNG
+    this.updateSceneInfoBuffer();
+    this.frameCount++;
+
     const commandEncoder = this.device.createCommandEncoder();
 
     const computePass = commandEncoder.beginComputePass();
@@ -304,6 +364,13 @@ export class Renderer {
     const dispatchY = Math.ceil(this.height / workgroupSize);
     computePass.dispatchWorkgroups(dispatchX, dispatchY);
     computePass.end();
+
+    // Copy output to accumulation for next frame
+    commandEncoder.copyTextureToTexture(
+      { texture: this.outputTexture },
+      { texture: this.accumulationTexture },
+      { width: this.width, height: this.height }
+    );
 
     const textureView = this.context.getCurrentTexture().createView();
     const renderPass = commandEncoder.beginRenderPass({

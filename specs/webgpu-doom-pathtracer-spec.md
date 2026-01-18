@@ -128,6 +128,63 @@ struct BVHNode {
 
 ---
 
+### Phase 5b: Spatial Denoiser
+
+**Goal:** Clean image during camera movement with low sample counts.
+
+**Deliverables:**
+- Edge-aware spatial filter (bilateral or à-trous wavelet)
+- G-buffer generation: normals and depth written alongside colour
+- Filter respects edges — doesn't blur across depth/normal discontinuities
+- Configurable filter strength/radius
+
+**G-buffer additions:**
+
+Extend your raytrace shader to output:
+- Colour (already have this)
+- World-space normal at primary hit
+- Depth (ray t value or linear depth)
+```wgsl
+@group(0) @binding(1) var output_colour: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(2) var output_normal: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(3) var output_depth: texture_storage_2d<r32float, write>;
+```
+
+**Bilateral filter (simple approach):**
+
+Separate compute pass after path tracing:
+```wgsl
+fn bilateral_weight(
+    centre_normal: vec3f, sample_normal: vec3f,
+    centre_depth: f32, sample_depth: f32,
+    spatial_dist_sq: f32
+) -> f32 {
+    let normal_weight = pow(max(0.0, dot(centre_normal, sample_normal)), 128.0);
+    let depth_weight = exp(-abs(centre_depth - sample_depth) * 10.0);
+    let spatial_weight = exp(-spatial_dist_sq / 8.0);
+    return normal_weight * depth_weight * spatial_weight;
+}
+```
+
+Sample a kernel (5x5 or 7x7), weight by similarity, normalise.
+
+**À-trous wavelet (better quality):**
+
+Multiple passes at increasing step sizes (1, 2, 4, 8, 16 pixels). Each pass is a sparse 5x5 kernel. Gives large effective radius without massive kernel.
+
+**Acceptance criteria:**
+- Navigable image at 1-4 samples per pixel
+- Sharp edges preserved at geometry boundaries
+- Noise visibly reduced in flat areas
+- Minimal ghosting or smearing during motion
+
+**Notes:**
+- Filter strength should be tunable — too aggressive looks plastic, too weak stays noisy
+- Consider running denoiser at lower resolution and upscaling for performance
+- This is spatial only; temporal reprojection is a separate enhancement
+
+---
+
 ### Phase 6: Materials
 
 **Goal:** Support multiple material types.
