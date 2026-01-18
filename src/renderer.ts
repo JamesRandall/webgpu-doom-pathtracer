@@ -1,4 +1,5 @@
 import raytraceShaderCode from './shaders/raytrace.wgsl?raw';
+import denoiseShaderCode from './shaders/denoise.wgsl?raw';
 import { Triangle, packTriangles } from './scene/geometry';
 import { BVHBuilder, flattenBVH, packBVHNodes } from './bvh/builder';
 
@@ -22,18 +23,28 @@ export class Renderer {
   private triangleCount: number = 0;
 
   private computePipeline!: GPUComputePipeline;
+  private denoisePipeline!: GPUComputePipeline;
   private renderPipeline!: GPURenderPipeline;
   private outputTexture!: GPUTexture;
+  private denoisedTexture!: GPUTexture;
   private accumulationTexture!: GPUTexture;
+  private normalTexture!: GPUTexture;
+  private depthTexture!: GPUTexture;
   private computeBindGroup!: GPUBindGroup;
+  private denoiseBindGroups!: GPUBindGroup[];
   private renderBindGroup!: GPUBindGroup;
   private cameraBuffer!: GPUBuffer;
   private triangleBuffer!: GPUBuffer;
   private bvhBuffer!: GPUBuffer;
   private sceneInfoBuffer!: GPUBuffer;
   private sampler!: GPUSampler;
+  private denoiseParamsBuffer!: GPUBuffer;
+  private pingPongTexture!: GPUTexture;
   private lastCameraPosition = { x: 0, y: 0, z: 0 };
   private lastCameraDirection = { x: 0, y: 0, z: 1 };
+
+  // Denoise settings
+  private readonly DENOISE_PASSES = 5; // Step sizes: 1, 2, 4, 8, 16
 
   constructor(
     device: GPUDevice,
@@ -83,6 +94,44 @@ export class Renderer {
         GPUTextureUsage.STORAGE_BINDING |
         GPUTextureUsage.TEXTURE_BINDING |
         GPUTextureUsage.COPY_DST,
+    });
+
+    // Create denoised texture (output of denoise pass)
+    this.denoisedTexture = this.device.createTexture({
+      size: { width: this.width, height: this.height },
+      format: 'rgba16float',
+      usage:
+        GPUTextureUsage.STORAGE_BINDING |
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST,
+    });
+
+    // G-buffer: normals
+    this.normalTexture = this.device.createTexture({
+      size: { width: this.width, height: this.height },
+      format: 'rgba16float',
+      usage:
+        GPUTextureUsage.STORAGE_BINDING |
+        GPUTextureUsage.TEXTURE_BINDING,
+    });
+
+    // G-buffer: depth
+    this.depthTexture = this.device.createTexture({
+      size: { width: this.width, height: this.height },
+      format: 'r32float',
+      usage:
+        GPUTextureUsage.STORAGE_BINDING |
+        GPUTextureUsage.TEXTURE_BINDING,
+    });
+
+    // Ping-pong texture for denoise passes
+    this.pingPongTexture = this.device.createTexture({
+      size: { width: this.width, height: this.height },
+      format: 'rgba16float',
+      usage:
+        GPUTextureUsage.STORAGE_BINDING |
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_SRC,
     });
 
     // Create camera uniform buffer
@@ -156,6 +205,24 @@ export class Renderer {
           visibility: GPUShaderStage.COMPUTE,
           texture: { sampleType: 'float', viewDimension: '2d' },
         },
+        {
+          binding: 6,
+          visibility: GPUShaderStage.COMPUTE,
+          storageTexture: {
+            access: 'write-only',
+            format: 'rgba16float',
+            viewDimension: '2d',
+          },
+        },
+        {
+          binding: 7,
+          visibility: GPUShaderStage.COMPUTE,
+          storageTexture: {
+            access: 'write-only',
+            format: 'r32float',
+            viewDimension: '2d',
+          },
+        },
       ],
     });
 
@@ -197,8 +264,112 @@ export class Renderer {
           binding: 5,
           resource: this.accumulationTexture.createView(),
         },
+        {
+          binding: 6,
+          resource: this.normalTexture.createView(),
+        },
+        {
+          binding: 7,
+          resource: this.depthTexture.createView(),
+        },
       ],
     });
+
+    // Create denoise params buffer
+    this.denoiseParamsBuffer = this.device.createBuffer({
+      size: 16, // step_size (u32) + sigma_color (f32) + sigma_normal (f32) + sigma_depth (f32)
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Create denoise shader module
+    const denoiseShaderModule = this.device.createShaderModule({
+      code: denoiseShaderCode,
+    });
+
+    // Create denoise pipeline
+    const denoiseBindGroupLayout = this.device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.COMPUTE,
+          texture: { sampleType: 'float', viewDimension: '2d' },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.COMPUTE,
+          texture: { sampleType: 'float', viewDimension: '2d' },
+        },
+        {
+          binding: 2,
+          visibility: GPUShaderStage.COMPUTE,
+          texture: { sampleType: 'unfilterable-float', viewDimension: '2d' },
+        },
+        {
+          binding: 3,
+          visibility: GPUShaderStage.COMPUTE,
+          storageTexture: {
+            access: 'write-only',
+            format: 'rgba16float',
+            viewDimension: '2d',
+          },
+        },
+        {
+          binding: 4,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'uniform' },
+        },
+      ],
+    });
+
+    this.denoisePipeline = this.device.createComputePipeline({
+      layout: this.device.createPipelineLayout({
+        bindGroupLayouts: [denoiseBindGroupLayout],
+      }),
+      compute: {
+        module: denoiseShaderModule,
+        entryPoint: 'main',
+      },
+    });
+
+    // Create denoise bind groups for ping-pong (output -> pingPong, pingPong -> denoised)
+    // We need 2 * DENOISE_PASSES bind groups for alternating input/output
+    this.denoiseBindGroups = [];
+
+    // First pass: output -> pingPong
+    this.denoiseBindGroups.push(this.device.createBindGroup({
+      layout: denoiseBindGroupLayout,
+      entries: [
+        { binding: 0, resource: this.outputTexture.createView() },
+        { binding: 1, resource: this.normalTexture.createView() },
+        { binding: 2, resource: this.depthTexture.createView() },
+        { binding: 3, resource: this.pingPongTexture.createView() },
+        { binding: 4, resource: { buffer: this.denoiseParamsBuffer } },
+      ],
+    }));
+
+    // Even passes: pingPong -> denoised
+    this.denoiseBindGroups.push(this.device.createBindGroup({
+      layout: denoiseBindGroupLayout,
+      entries: [
+        { binding: 0, resource: this.pingPongTexture.createView() },
+        { binding: 1, resource: this.normalTexture.createView() },
+        { binding: 2, resource: this.depthTexture.createView() },
+        { binding: 3, resource: this.denoisedTexture.createView() },
+        { binding: 4, resource: { buffer: this.denoiseParamsBuffer } },
+      ],
+    }));
+
+    // Odd passes: denoised -> pingPong
+    this.denoiseBindGroups.push(this.device.createBindGroup({
+      layout: denoiseBindGroupLayout,
+      entries: [
+        { binding: 0, resource: this.denoisedTexture.createView() },
+        { binding: 1, resource: this.normalTexture.createView() },
+        { binding: 2, resource: this.depthTexture.createView() },
+        { binding: 3, resource: this.pingPongTexture.createView() },
+        { binding: 4, resource: { buffer: this.denoiseParamsBuffer } },
+      ],
+    }));
 
     // Create sampler for blit
     this.sampler = this.device.createSampler({
@@ -285,7 +456,7 @@ export class Renderer {
       entries: [
         {
           binding: 0,
-          resource: this.outputTexture.createView(),
+          resource: this.denoisedTexture.createView(),
         },
         {
           binding: 1,
@@ -355,6 +526,7 @@ export class Renderer {
 
     const commandEncoder = this.device.createCommandEncoder();
 
+    // Path tracing pass
     const computePass = commandEncoder.beginComputePass();
     computePass.setPipeline(this.computePipeline);
     computePass.setBindGroup(0, this.computeBindGroup);
@@ -371,6 +543,48 @@ export class Renderer {
       { texture: this.accumulationTexture },
       { width: this.width, height: this.height }
     );
+
+    // À-trous wavelet denoise passes
+    // Step sizes: 1, 2, 4, 8, 16
+    for (let i = 0; i < this.DENOISE_PASSES; i++) {
+      const stepSize = 1 << i; // 1, 2, 4, 8, 16
+
+      // Update denoise params
+      const paramsData = new ArrayBuffer(16);
+      const paramsUint = new Uint32Array(paramsData);
+      const paramsFloat = new Float32Array(paramsData);
+      paramsUint[0] = stepSize;
+      paramsFloat[1] = 4.0;   // sigma_color
+      paramsFloat[2] = 128.0; // sigma_normal (power for normal weight)
+      paramsFloat[3] = 1.0;   // sigma_depth
+      this.device.queue.writeBuffer(this.denoiseParamsBuffer, 0, paramsData);
+
+      const denoisePass = commandEncoder.beginComputePass();
+      denoisePass.setPipeline(this.denoisePipeline);
+
+      // Select appropriate bind group for ping-pong
+      let bindGroupIndex: number;
+      if (i === 0) {
+        bindGroupIndex = 0; // output -> pingPong
+      } else if (i % 2 === 1) {
+        bindGroupIndex = 1; // pingPong -> denoised
+      } else {
+        bindGroupIndex = 2; // denoised -> pingPong
+      }
+
+      denoisePass.setBindGroup(0, this.denoiseBindGroups[bindGroupIndex]);
+      denoisePass.dispatchWorkgroups(dispatchX, dispatchY);
+      denoisePass.end();
+    }
+
+    // If odd number of passes, final result is in pingPong, need to copy to denoised
+    if (this.DENOISE_PASSES % 2 === 1) {
+      commandEncoder.copyTextureToTexture(
+        { texture: this.pingPongTexture },
+        { texture: this.denoisedTexture },
+        { width: this.width, height: this.height }
+      );
+    }
 
     const textureView = this.context.getCurrentTexture().createView();
     const renderPass = commandEncoder.beginRenderPass({

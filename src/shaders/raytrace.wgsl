@@ -55,6 +55,8 @@ struct HitInfo {
 @group(0) @binding(3) var<storage, read> bvh_nodes: array<BVHNode>;
 @group(0) @binding(4) var<uniform> scene_info: SceneInfo;
 @group(0) @binding(5) var accumulation: texture_2d<f32>;
+@group(0) @binding(6) var output_normal: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(7) var output_depth: texture_storage_2d<r32float, write>;
 
 const MAX_STACK_SIZE = 32u;
 const LEAF_FLAG = 0x80000000u;
@@ -296,6 +298,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
 
   let ray_origin = camera.position;
   let ray_dir = generate_ray(pixel);
+
+  // Get primary ray hit for G-buffer
+  let primary_hit = trace_bvh(ray_origin, ray_dir);
+
+  // Write G-buffer data (normal and depth from primary hit)
+  var primary_normal = vec3f(0.0);
+  var primary_depth = 1e30;
+  if (primary_hit.hit) {
+    primary_normal = primary_hit.normal;
+    // Flip normal if we hit backface
+    if (dot(ray_dir, primary_normal) > 0.0) {
+      primary_normal = -primary_normal;
+    }
+    primary_depth = primary_hit.t;
+  }
+  textureStore(output_normal, global_id.xy, vec4f(primary_normal, 1.0));
+  textureStore(output_depth, global_id.xy, vec4f(primary_depth, 0.0, 0.0, 0.0));
 
   // Path trace
   var color = path_trace(ray_origin, ray_dir, &rng_state);

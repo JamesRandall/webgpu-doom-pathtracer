@@ -185,6 +185,117 @@ Multiple passes at increasing step sizes (1, 2, 4, 8, 16 pixels). Each pass is a
 
 ---
 
+### Phase 5c: Temporal Reprojection
+
+**Goal:** Maintain stable image during camera movement by blending with reprojected history.
+
+**Deliverables:**
+- Store previous frame's camera matrix
+- Reproject current pixel world position to previous screen space
+- Blend current sample with history based on validity
+- Disocclusion detection to reject invalid history
+- History buffer (separate from accumulation buffer)
+
+**Core concept:**
+
+Each frame, instead of just averaging with the accumulation buffer (which assumes static camera), you ask: "where was this surface last frame?" and sample the history there.
+```
+current pixel → world position → previous frame screen position → sample history → blend
+```
+
+**World position reconstruction:**
+
+You already have depth from the G-buffer. Reconstruct world position:
+```wgsl
+fn reconstruct_world_pos(pixel: vec2f, depth: f32, inv_view_proj: mat4x4f) -> vec3f {
+    let ndc = vec2f(
+        (pixel.x / screen_width) * 2.0 - 1.0,
+        1.0 - (pixel.y / screen_height) * 2.0
+    );
+    let clip = vec4f(ndc, depth, 1.0);
+    let world = inv_view_proj * clip;
+    return world.xyz / world.w;
+}
+```
+
+**Reprojection:**
+```wgsl
+fn reproject(world_pos: vec3f, prev_view_proj: mat4x4f) -> vec2f {
+    let clip = prev_view_proj * vec4f(world_pos, 1.0);
+    let ndc = clip.xy / clip.w;
+    return vec2f(
+        (ndc.x * 0.5 + 0.5) * screen_width,
+        (0.5 - ndc.y * 0.5) * screen_height
+    );
+}
+```
+
+**Disocclusion detection:**
+
+Compare current depth with reprojected previous depth. If they differ significantly, the surface wasn't visible last frame:
+```wgsl
+let prev_pixel = reproject(world_pos, prev_view_proj);
+let prev_depth = sample_prev_depth(prev_pixel);
+let expected_depth = compute_expected_depth(world_pos, prev_view_proj);
+
+let depth_threshold = 0.1;
+let valid_history = abs(prev_depth - expected_depth) < depth_threshold;
+```
+
+Also reject if reprojected position is off-screen.
+
+**Blending:**
+```wgsl
+let blend_factor = select(1.0, 0.1, valid_history);  // 10% new if history valid, 100% new if not
+let result = mix(history_colour, current_colour, blend_factor);
+```
+
+**Additional rejection heuristics:**
+
+- Normal difference: if surface normal changed significantly, reject history
+- Motion vectors: for very fast motion, increase blend factor toward current
+- Clamping: clamp history colour to neighbourhood min/max of current frame to reduce ghosting
+
+**Neighbourhood clamping (reduces ghosting):**
+```wgsl
+// Sample 3x3 neighbourhood of current frame
+let min_colour = /* min of neighbourhood */;
+let max_colour = /* max of neighbourhood */;
+let clamped_history = clamp(history_colour, min_colour, max_colour);
+let result = mix(clamped_history, current_colour, blend_factor);
+```
+
+**Buffers needed:**
+
+- Current colour (path trace output)
+- Current depth (G-buffer)
+- Current normal (G-buffer)
+- History colour (previous frame's output)
+- History depth (previous frame's depth)
+- Previous camera matrices (CPU uniform)
+
+**Pipeline:**
+
+1. Path trace → current colour, depth, normal
+2. Temporal reprojection pass → blend with history
+3. Spatial denoise (5b) → clean up remaining noise
+4. Copy result to history buffer for next frame
+5. Tonemap and present
+
+**Acceptance criteria:**
+- Smooth camera movement without obvious dotty noise
+- Minimal ghosting on edges and thin geometry
+- Disoccluded regions (coming around corners) converge within a few frames
+- No smearing or trailing on moving camera
+
+**Notes:**
+- Order matters: temporal first, then spatial. Temporal brings in history, spatial cleans up what's left.
+- The blend factor (0.1) is a starting point — tune based on how aggressive your denoiser is
+- Neighbourhood clamping is essential to avoid ghosting; don't skip it
+- You'll need to double-buffer or ping-pong the history texture
+
+---
+
 ### Phase 6: Materials
 
 **Goal:** Support multiple material types.
