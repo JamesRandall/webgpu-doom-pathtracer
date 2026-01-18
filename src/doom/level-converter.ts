@@ -5,169 +5,160 @@ import { Triangle, Material, Vec3, SceneData, MATERIAL_DIFFUSE, MATERIAL_EMISSIV
 // Doom units to world units scale (Doom 1 unit ≈ 1 inch, we'll use ~1/64 for reasonable world scale)
 const SCALE = 1 / 64;
 
+// Global emissive multiplier for tuning light intensity
+const EMISSIVE_MULTIPLIER = 3.0;
+
 // Linedef flags
 const ML_TWOSIDED = 0x0004;
 
+// Emissive texture patterns
+const EMISSIVE_TEXTURES = [
+  'LITE',     // LITE3, LITE5, LITEBLU1, etc.
+  'TLITE',    // TLITE6_1, etc.
+  'BFALL',    // Blood fall (glowing)
+  'SFALL',    // Slime fall (glowing)
+  'FIREBLU',  // Animated fire
+  'FIRELAV',  // Fire/lava
+  'FIREMAG',  // Fire/magma
+  'FIREWALA', // Fire wall
+  'FIREWALB',
+  'FIREWALL',
+  'NUKAGE',   // Nukage (glowing green)
+  'FWATER',   // Glowing water
+  'LAVA',     // Lava
+  'BLOOD',    // Blood (slightly glowing)
+  'COMP',     // Computer screens (COMPSTA*, etc.)
+  'COMPSTA',
+  'SW1COMP',  // Computer switches
+  'SW2COMP',
+];
+
 interface SectorPolygon {
   sectorIndex: number;
-  vertices: Vec3[];  // 2D vertices (y will be height)
+  vertices: Vec3[];
+}
+
+// Check if a texture name is emissive
+function isEmissiveTexture(textureName: string): boolean {
+  const upper = textureName.toUpperCase().replace(/\0/g, '');
+  for (const pattern of EMISSIVE_TEXTURES) {
+    if (upper.startsWith(pattern)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Get emissive color based on texture name
+function getEmissiveColor(textureName: string): Vec3 {
+  const upper = textureName.toUpperCase();
+
+  if (upper.includes('BLU') || upper.includes('COMP')) {
+    // Blue lights / computer screens
+    return { x: 0.3 * EMISSIVE_MULTIPLIER, y: 0.5 * EMISSIVE_MULTIPLIER, z: 1.0 * EMISSIVE_MULTIPLIER };
+  } else if (upper.includes('FIRE') || upper.includes('LAV') || upper.includes('RED')) {
+    // Fire / lava - orange/red
+    return { x: 1.0 * EMISSIVE_MULTIPLIER, y: 0.4 * EMISSIVE_MULTIPLIER, z: 0.1 * EMISSIVE_MULTIPLIER };
+  } else if (upper.includes('NUK') || upper.includes('SLIME') || upper.includes('SFALL')) {
+    // Nukage / slime - green
+    return { x: 0.2 * EMISSIVE_MULTIPLIER, y: 1.0 * EMISSIVE_MULTIPLIER, z: 0.2 * EMISSIVE_MULTIPLIER };
+  } else if (upper.includes('BLOOD') || upper.includes('BFALL')) {
+    // Blood - dark red
+    return { x: 0.8 * EMISSIVE_MULTIPLIER, y: 0.1 * EMISSIVE_MULTIPLIER, z: 0.1 * EMISSIVE_MULTIPLIER };
+  } else {
+    // Default white/yellow light
+    return { x: 1.0 * EMISSIVE_MULTIPLIER, y: 0.95 * EMISSIVE_MULTIPLIER, z: 0.8 * EMISSIVE_MULTIPLIER };
+  }
+}
+
+// Convert sector light level (0-255) to brightness multiplier
+function lightLevelToBrightness(lightLevel: number): number {
+  // Doom light levels: 0 = dark, 255 = bright
+  // We'll map this to a reasonable range for path tracing
+  // Using a slight curve to make dark areas darker
+  const normalized = lightLevel / 255;
+  return 0.1 + 0.9 * Math.pow(normalized, 1.5);
 }
 
 export function convertLevelToScene(level: LevelData): SceneData {
   const triangles: Triangle[] = [];
   const materials: Material[] = [];
+  const materialCache: Map<string, number> = new Map();
 
-  // Create base materials
-  // 0: Default wall (gray)
-  materials.push({
-    albedo: { x: 0.6, y: 0.6, z: 0.6 },
-    emissive: { x: 0, y: 0, z: 0 },
-    roughness: 0.8,
-    materialType: MATERIAL_DIFFUSE,
-  });
+  // Helper to get or create a material
+  function getMaterial(
+    type: 'wall' | 'floor' | 'ceiling' | 'sky',
+    lightLevel: number,
+    textureName: string = ''
+  ): number {
+    const isEmissive = isEmissiveTexture(textureName);
+    const brightness = lightLevelToBrightness(lightLevel);
+    const key = `${type}-${lightLevel}-${textureName}-${isEmissive}`;
 
-  // 1: Floor (darker gray)
-  materials.push({
-    albedo: { x: 0.4, y: 0.4, z: 0.4 },
-    emissive: { x: 0, y: 0, z: 0 },
-    roughness: 0.9,
-    materialType: MATERIAL_DIFFUSE,
-  });
+    if (materialCache.has(key)) {
+      return materialCache.get(key)!;
+    }
 
-  // 2: Ceiling (lighter gray)
-  materials.push({
-    albedo: { x: 0.5, y: 0.5, z: 0.5 },
-    emissive: { x: 0, y: 0, z: 0 },
-    roughness: 0.9,
-    materialType: MATERIAL_DIFFUSE,
-  });
+    const index = materials.length;
+    materialCache.set(key, index);
 
-  // 3: Sky/emissive ceiling
-  materials.push({
-    albedo: { x: 0.5, y: 0.6, z: 0.8 },
-    emissive: { x: 2.0, y: 2.5, z: 3.0 },
-    roughness: 1.0,
-    materialType: MATERIAL_EMISSIVE,
-  });
+    if (type === 'sky') {
+      // Sky is always emissive
+      materials.push({
+        albedo: { x: 0.6, y: 0.7, z: 0.9 },
+        emissive: { x: 1.5, y: 2.0, z: 3.0 },
+        roughness: 1.0,
+        materialType: MATERIAL_EMISSIVE,
+      });
+    } else if (isEmissive) {
+      const emissiveColor = getEmissiveColor(textureName);
+      materials.push({
+        albedo: { x: 1.0, y: 1.0, z: 1.0 },
+        emissive: emissiveColor,
+        roughness: 1.0,
+        materialType: MATERIAL_EMISSIVE,
+      });
+    } else {
+      // Base colors for different surface types
+      let baseColor: Vec3;
+      switch (type) {
+        case 'wall':
+          baseColor = { x: 0.6, y: 0.55, z: 0.5 };
+          break;
+        case 'floor':
+          baseColor = { x: 0.45, y: 0.42, z: 0.4 };
+          break;
+        case 'ceiling':
+          baseColor = { x: 0.5, y: 0.48, z: 0.45 };
+          break;
+        default:
+          baseColor = { x: 0.5, y: 0.5, z: 0.5 };
+      }
 
-  // 4: Light texture (emissive)
-  materials.push({
-    albedo: { x: 1.0, y: 1.0, z: 0.9 },
-    emissive: { x: 8.0, y: 8.0, z: 7.0 },
-    roughness: 1.0,
-    materialType: MATERIAL_EMISSIVE,
-  });
+      // Apply brightness from sector light level
+      materials.push({
+        albedo: {
+          x: baseColor.x * brightness,
+          y: baseColor.y * brightness,
+          z: baseColor.z * brightness,
+        },
+        emissive: { x: 0, y: 0, z: 0 },
+        roughness: 0.85,
+        materialType: MATERIAL_DIFFUSE,
+      });
+    }
 
-  const MAT_WALL = 0;
-  const MAT_FLOOR = 1;
-  const MAT_CEILING = 2;
-  const MAT_SKY = 3;
-  const MAT_LIGHT = 4;
+    return index;
+  }
 
   // Convert vertices from Doom coordinates to our coordinate system
-  // Doom: X = east, Y = north, Z = up (implicit from sector heights)
-  // Our system: X = right, Y = up, Z = forward
   const convertVertex = (v: Vertex, height: number): Vec3 => ({
     x: v.x * SCALE,
     y: height * SCALE,
-    z: v.y * SCALE,  // Doom Y becomes our Z
+    z: v.y * SCALE,
   });
 
-  // Process walls from linedefs
-  for (let i = 0; i < level.linedefs.length; i++) {
-    const linedef = level.linedefs[i];
-    const v1 = level.vertices[linedef.startVertex];
-    const v2 = level.vertices[linedef.endVertex];
-
-    // Process right sidedef (always present for valid linedefs)
-    if (linedef.rightSidedef !== -1) {
-      const sidedef = level.sidedefs[linedef.rightSidedef];
-      const sector = level.sectors[sidedef.sector];
-
-      if (linedef.flags & ML_TWOSIDED) {
-        // Two-sided linedef - need to check for upper/lower textures
-        if (linedef.leftSidedef !== -1) {
-          const backSidedef = level.sidedefs[linedef.leftSidedef];
-          const backSector = level.sectors[backSidedef.sector];
-
-          // Upper wall (if front ceiling is higher than back ceiling)
-          if (sector.ceilingHeight > backSector.ceilingHeight) {
-            const top = sector.ceilingHeight;
-            const bottom = backSector.ceilingHeight;
-            triangles.push(...createWallQuad(v1, v2, bottom, top, MAT_WALL, false));
-          }
-
-          // Lower wall (if front floor is lower than back floor)
-          if (sector.floorHeight < backSector.floorHeight) {
-            const top = backSector.floorHeight;
-            const bottom = sector.floorHeight;
-            triangles.push(...createWallQuad(v1, v2, bottom, top, MAT_WALL, false));
-          }
-        }
-      } else {
-        // One-sided linedef - full wall from floor to ceiling
-        const floorHeight = sector.floorHeight;
-        const ceilingHeight = sector.ceilingHeight;
-        triangles.push(...createWallQuad(v1, v2, floorHeight, ceilingHeight, MAT_WALL, false));
-      }
-    }
-
-    // Process left sidedef if present
-    if (linedef.leftSidedef !== -1) {
-      const sidedef = level.sidedefs[linedef.leftSidedef];
-      const sector = level.sectors[sidedef.sector];
-
-      if (linedef.flags & ML_TWOSIDED) {
-        if (linedef.rightSidedef !== -1) {
-          const frontSidedef = level.sidedefs[linedef.rightSidedef];
-          const frontSector = level.sectors[frontSidedef.sector];
-
-          // Upper wall (from back side, if back ceiling is higher than front ceiling)
-          if (sector.ceilingHeight > frontSector.ceilingHeight) {
-            const top = sector.ceilingHeight;
-            const bottom = frontSector.ceilingHeight;
-            triangles.push(...createWallQuad(v1, v2, bottom, top, MAT_WALL, true));
-          }
-
-          // Lower wall (from back side, if back floor is lower than front floor)
-          if (sector.floorHeight < frontSector.floorHeight) {
-            const top = frontSector.floorHeight;
-            const bottom = sector.floorHeight;
-            triangles.push(...createWallQuad(v1, v2, bottom, top, MAT_WALL, true));
-          }
-        }
-      }
-    }
-  }
-
-  // Build floor and ceiling polygons for each sector
-  const sectorPolygons = buildSectorPolygons(level);
-
-  for (const polygon of sectorPolygons) {
-    const sector = level.sectors[polygon.sectorIndex];
-
-    // Check if ceiling is sky
-    const isSky = sector.ceilingTexture.startsWith('F_SKY');
-    const ceilingMat = isSky ? MAT_SKY : MAT_CEILING;
-
-    // Triangulate and add floor
-    const floorTris = triangulatePolygon(polygon.vertices, sector.floorHeight * SCALE, false);
-    for (const tri of floorTris) {
-      triangles.push({ ...tri, materialIndex: MAT_FLOOR });
-    }
-
-    // Triangulate and add ceiling
-    const ceilingTris = triangulatePolygon(polygon.vertices, sector.ceilingHeight * SCALE, true);
-    for (const tri of ceilingTris) {
-      triangles.push({ ...tri, materialIndex: ceilingMat });
-    }
-  }
-
-  console.log(`Converted level ${level.name}: ${triangles.length} triangles`);
-
-  return { triangles, materials };
-
-  // Helper function to create a wall quad (2 triangles)
+  // Helper function to create a wall quad
   function createWallQuad(
     v1: Vertex,
     v2: Vertex,
@@ -181,20 +172,123 @@ export function convertLevelToScene(level: LevelData): SceneData {
     const p3 = convertVertex(v2, topHeight);
     const p4 = convertVertex(v1, topHeight);
 
-    const triangles: Triangle[] = [];
+    const tris: Triangle[] = [];
 
     if (flip) {
-      // Back face
-      triangles.push(createTriangle(p2, p1, p4, materialIndex));
-      triangles.push(createTriangle(p2, p4, p3, materialIndex));
+      tris.push(createTriangle(p2, p1, p4, materialIndex));
+      tris.push(createTriangle(p2, p4, p3, materialIndex));
     } else {
-      // Front face
-      triangles.push(createTriangle(p1, p2, p3, materialIndex));
-      triangles.push(createTriangle(p1, p3, p4, materialIndex));
+      tris.push(createTriangle(p1, p2, p3, materialIndex));
+      tris.push(createTriangle(p1, p3, p4, materialIndex));
     }
 
-    return triangles;
+    return tris;
   }
+
+  // Process walls from linedefs
+  for (let i = 0; i < level.linedefs.length; i++) {
+    const linedef = level.linedefs[i];
+    const v1 = level.vertices[linedef.startVertex];
+    const v2 = level.vertices[linedef.endVertex];
+
+    // Process right sidedef
+    if (linedef.rightSidedef !== -1) {
+      const sidedef = level.sidedefs[linedef.rightSidedef];
+      const sector = level.sectors[sidedef.sector];
+
+      if (linedef.flags & ML_TWOSIDED) {
+        if (linedef.leftSidedef !== -1) {
+          const backSidedef = level.sidedefs[linedef.leftSidedef];
+          const backSector = level.sectors[backSidedef.sector];
+
+          // Upper wall
+          if (sector.ceilingHeight > backSector.ceilingHeight) {
+            const mat = getMaterial('wall', sector.lightLevel, sidedef.upperTexture);
+            triangles.push(...createWallQuad(v1, v2, backSector.ceilingHeight, sector.ceilingHeight, mat, false));
+          }
+
+          // Lower wall
+          if (sector.floorHeight < backSector.floorHeight) {
+            const mat = getMaterial('wall', sector.lightLevel, sidedef.lowerTexture);
+            triangles.push(...createWallQuad(v1, v2, sector.floorHeight, backSector.floorHeight, mat, false));
+          }
+
+          // Middle texture (if present, for fences/gratings)
+          if (sidedef.middleTexture && sidedef.middleTexture !== '-') {
+            const mat = getMaterial('wall', sector.lightLevel, sidedef.middleTexture);
+            const top = Math.min(sector.ceilingHeight, backSector.ceilingHeight);
+            const bottom = Math.max(sector.floorHeight, backSector.floorHeight);
+            if (top > bottom) {
+              triangles.push(...createWallQuad(v1, v2, bottom, top, mat, false));
+            }
+          }
+        }
+      } else {
+        // One-sided linedef
+        const mat = getMaterial('wall', sector.lightLevel, sidedef.middleTexture);
+        triangles.push(...createWallQuad(v1, v2, sector.floorHeight, sector.ceilingHeight, mat, false));
+      }
+    }
+
+    // Process left sidedef
+    if (linedef.leftSidedef !== -1) {
+      const sidedef = level.sidedefs[linedef.leftSidedef];
+      const sector = level.sectors[sidedef.sector];
+
+      if (linedef.flags & ML_TWOSIDED) {
+        if (linedef.rightSidedef !== -1) {
+          const frontSidedef = level.sidedefs[linedef.rightSidedef];
+          const frontSector = level.sectors[frontSidedef.sector];
+
+          // Upper wall (from back side)
+          if (sector.ceilingHeight > frontSector.ceilingHeight) {
+            const mat = getMaterial('wall', sector.lightLevel, sidedef.upperTexture);
+            triangles.push(...createWallQuad(v1, v2, frontSector.ceilingHeight, sector.ceilingHeight, mat, true));
+          }
+
+          // Lower wall (from back side)
+          if (sector.floorHeight < frontSector.floorHeight) {
+            const mat = getMaterial('wall', sector.lightLevel, sidedef.lowerTexture);
+            triangles.push(...createWallQuad(v1, v2, sector.floorHeight, frontSector.floorHeight, mat, true));
+          }
+        }
+      }
+    }
+  }
+
+  // Build floor and ceiling polygons for each sector
+  const sectorPolygons = buildSectorPolygons(level);
+
+  for (const polygon of sectorPolygons) {
+    const sector = level.sectors[polygon.sectorIndex];
+
+    // Check if ceiling is sky
+    const isSky = sector.ceilingTexture.toUpperCase().startsWith('F_SKY');
+
+    // Floor material
+    const floorMat = getMaterial('floor', sector.lightLevel, sector.floorTexture);
+
+    // Ceiling material
+    const ceilingMat = isSky
+      ? getMaterial('sky', 255, 'SKY')
+      : getMaterial('ceiling', sector.lightLevel, sector.ceilingTexture);
+
+    // Triangulate and add floor
+    const floorTris = triangulatePolygon(polygon.vertices, sector.floorHeight * SCALE, false);
+    for (const tri of floorTris) {
+      triangles.push({ ...tri, materialIndex: floorMat });
+    }
+
+    // Triangulate and add ceiling
+    const ceilingTris = triangulatePolygon(polygon.vertices, sector.ceilingHeight * SCALE, true);
+    for (const tri of ceilingTris) {
+      triangles.push({ ...tri, materialIndex: ceilingMat });
+    }
+  }
+
+  console.log(`Converted level ${level.name}: ${triangles.length} triangles, ${materials.length} materials`);
+
+  return { triangles, materials };
 }
 
 // Create a triangle with computed normal
@@ -228,7 +322,6 @@ function normalize(v: Vec3): Vec3 {
 function buildSectorPolygons(level: LevelData): SectorPolygon[] {
   const polygons: SectorPolygon[] = [];
 
-  // Build a map of sector -> linedefs
   const sectorLinedefs: Map<number, { linedef: Linedef; startVertex: number; endVertex: number }[]> = new Map();
 
   for (const linedef of level.linedefs) {
@@ -249,7 +342,6 @@ function buildSectorPolygons(level: LevelData): SectorPolygon[] {
       if (!sectorLinedefs.has(sectorIndex)) {
         sectorLinedefs.set(sectorIndex, []);
       }
-      // For left sidedef, the edge direction is reversed
       sectorLinedefs.get(sectorIndex)!.push({
         linedef,
         startVertex: linedef.endVertex,
@@ -258,13 +350,10 @@ function buildSectorPolygons(level: LevelData): SectorPolygon[] {
     }
   }
 
-  // For each sector, trace the polygon(s)
   for (const [sectorIndex, edges] of sectorLinedefs) {
     const usedEdges = new Set<number>();
 
-    // May have multiple polygons per sector (islands)
     while (usedEdges.size < edges.length) {
-      // Find an unused edge to start
       let startEdgeIndex = -1;
       for (let i = 0; i < edges.length; i++) {
         if (!usedEdges.has(i)) {
@@ -279,7 +368,6 @@ function buildSectorPolygons(level: LevelData): SectorPolygon[] {
       let currentVertex = edges[currentEdgeIndex].startVertex;
       const firstVertex = currentVertex;
 
-      // Trace the polygon
       let safety = 0;
       const maxIterations = edges.length + 1;
 
@@ -288,7 +376,6 @@ function buildSectorPolygons(level: LevelData): SectorPolygon[] {
 
         if (currentEdgeIndex === -1) break;
         if (usedEdges.has(currentEdgeIndex)) {
-          // Check if we've completed the loop
           if (edges[currentEdgeIndex].startVertex === firstVertex) break;
           currentEdgeIndex = -1;
           break;
@@ -302,7 +389,6 @@ function buildSectorPolygons(level: LevelData): SectorPolygon[] {
 
         currentVertex = edge.endVertex;
 
-        // Find next edge that starts where this one ends
         currentEdgeIndex = -1;
         for (let i = 0; i < edges.length; i++) {
           if (!usedEdges.has(i) && edges[i].startVertex === currentVertex) {
@@ -311,7 +397,6 @@ function buildSectorPolygons(level: LevelData): SectorPolygon[] {
           }
         }
 
-        // Check if we've completed the loop
         if (currentVertex === firstVertex) break;
       }
 
@@ -324,17 +409,13 @@ function buildSectorPolygons(level: LevelData): SectorPolygon[] {
   return polygons;
 }
 
-// Simple ear clipping triangulation for convex/simple polygons
+// Simple fan triangulation
 function triangulatePolygon(vertices: Vec3[], height: number, flip: boolean): Triangle[] {
   if (vertices.length < 3) return [];
 
   const triangles: Triangle[] = [];
-
-  // Set all vertices to the correct height
   const verts = vertices.map(v => ({ x: v.x, y: height, z: v.z }));
 
-  // Simple fan triangulation (works well for mostly convex polygons)
-  // For more complex polygons, ear clipping would be needed
   for (let i = 1; i < verts.length - 1; i++) {
     if (flip) {
       triangles.push(createTriangle(verts[0], verts[i + 1], verts[i], 0));
