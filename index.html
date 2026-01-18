@@ -24,16 +24,35 @@
       text-align: center;
       display: none;
     }
+    #container {
+      position: relative;
+    }
     canvas {
       display: block;
       max-width: 100%;
       max-height: 100vh;
     }
+    #hint {
+      position: absolute;
+      bottom: 1rem;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 0.875rem;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+    #hint.hidden {
+      opacity: 0;
+    }
   </style>
 </head>
 <body>
   <div id="error"></div>
-  <canvas id="canvas" width="1280" height="720"></canvas>
+  <div id="container">
+    <canvas id="canvas" width="1280" height="720"></canvas>
+    <div id="hint">Click to capture mouse | WASD to move | Space/Shift for up/down | ESC to release</div>
+  </div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

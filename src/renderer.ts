@@ -1,4 +1,5 @@
 import raytraceShaderCode from './shaders/raytrace.wgsl?raw';
+import { Triangle, packTriangles } from './scene/geometry';
 
 export interface Camera {
   position: { x: number; y: number; z: number };
@@ -14,6 +15,7 @@ export class Renderer {
   private width: number;
   private height: number;
   private camera: Camera;
+  private triangles: Triangle[];
 
   private computePipeline!: GPUComputePipeline;
   private renderPipeline!: GPURenderPipeline;
@@ -21,6 +23,8 @@ export class Renderer {
   private computeBindGroup!: GPUBindGroup;
   private renderBindGroup!: GPUBindGroup;
   private cameraBuffer!: GPUBuffer;
+  private triangleBuffer!: GPUBuffer;
+  private sceneInfoBuffer!: GPUBuffer;
   private sampler!: GPUSampler;
 
   constructor(
@@ -29,7 +33,8 @@ export class Renderer {
     format: GPUTextureFormat,
     width: number,
     height: number,
-    camera: Camera
+    camera: Camera,
+    triangles: Triangle[]
   ) {
     this.device = device;
     this.context = context;
@@ -37,6 +42,7 @@ export class Renderer {
     this.width = width;
     this.height = height;
     this.camera = camera;
+    this.triangles = triangles;
   }
 
   async initialize(): Promise<void> {
@@ -57,6 +63,22 @@ export class Renderer {
     });
     this.updateCameraBuffer();
 
+    // Create triangle storage buffer
+    const triangleData = packTriangles(this.triangles);
+    this.triangleBuffer = this.device.createBuffer({
+      size: triangleData.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.triangleBuffer, 0, triangleData.buffer);
+
+    // Create scene info buffer (triangle count)
+    this.sceneInfoBuffer = this.device.createBuffer({
+      size: 16, // 1 u32 + padding
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const sceneInfo = new Uint32Array([this.triangles.length, 0, 0, 0]);
+    this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, sceneInfo);
+
     // Create compute shader module
     const computeShaderModule = this.device.createShaderModule({
       code: raytraceShaderCode,
@@ -76,6 +98,16 @@ export class Renderer {
         },
         {
           binding: 1,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'uniform' },
+        },
+        {
+          binding: 2,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage' },
+        },
+        {
+          binding: 3,
           visibility: GPUShaderStage.COMPUTE,
           buffer: { type: 'uniform' },
         },
@@ -103,6 +135,14 @@ export class Renderer {
         {
           binding: 1,
           resource: { buffer: this.cameraBuffer },
+        },
+        {
+          binding: 2,
+          resource: { buffer: this.triangleBuffer },
+        },
+        {
+          binding: 3,
+          resource: { buffer: this.sceneInfoBuffer },
         },
       ],
     });

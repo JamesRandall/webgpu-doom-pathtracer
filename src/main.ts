@@ -1,4 +1,6 @@
 import { Renderer } from './renderer';
+import { createCube } from './scene/geometry';
+import { CameraController } from './camera';
 
 async function main() {
   const errorDiv = document.getElementById('error') as HTMLDivElement;
@@ -36,19 +38,34 @@ async function main() {
     alphaMode: 'premultiplied',
   });
 
-  // Camera configuration - can be modified
-  const camera = {
-    position: { x: 0, y: 0, z: -3 },
-    direction: { x: 0, y: 0, z: 1 },
-    up: { x: 0, y: 1, z: 0 },
-    fov: 60, // degrees
-  };
+  // Camera controller - positioned to see the cube at an angle
+  // Camera at (3, 2, -3) looking toward origin: yaw ≈ -0.78 rad (-45°)
+  const cameraController = new CameraController(
+    { x: 3, y: 2, z: -3 },  // position
+    -0.78,                    // yaw (radians) - points toward -x, +z
+    -0.35,                    // pitch (radians) - look slightly down
+    60,                       // fov
+    5,                        // move speed
+    0.002                     // look sensitivity
+  );
+  cameraController.attach(canvas);
 
-  const renderer = new Renderer(device, context, format, canvas.width, canvas.height, camera);
+  // Create a cube at the origin
+  const triangles = createCube({ x: 0, y: 0, z: 0 }, 2);
+
+  const renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), triangles);
   await renderer.initialize();
 
-  function frame() {
+  let lastTime = performance.now();
+
+  function frame(currentTime: number) {
+    const deltaTime = (currentTime - lastTime) / 1000;
+    lastTime = currentTime;
+
+    cameraController.update(deltaTime);
+    renderer.updateCamera(cameraController.getCamera());
     renderer.render();
+
     requestAnimationFrame(frame);
   }
 
