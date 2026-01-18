@@ -45,6 +45,49 @@
     #hint.hidden {
       opacity: 0;
     }
+    #controls {
+      position: absolute;
+      top: 1rem;
+      right: 1rem;
+      background: rgba(0, 0, 0, 0.8);
+      padding: 1rem;
+      border-radius: 8px;
+      color: white;
+      font-size: 0.875rem;
+      min-width: 220px;
+    }
+    #controls label {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    #controls input[type="range"] {
+      width: 80px;
+    }
+    #controls input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+    }
+    #controls .value {
+      min-width: 45px;
+      text-align: right;
+      font-family: monospace;
+    }
+    #controls select {
+      background: #333;
+      color: white;
+      border: none;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+    #fps {
+      font-family: monospace;
+      font-size: 1rem;
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+    }
   </style>
 </head>
 <body>
@@ -52,6 +95,31 @@
   <div id="container">
     <canvas id="canvas" width="1280" height="800"></canvas>
     <div id="hint">Click to capture mouse | WASD to move | Space/Shift for up/down | ESC to release</div>
+    <div id="controls">
+      <div id="fps">FPS: --</div>
+      <label>
+        <span>Samples/pixel</span>
+        <input type="range" id="samples" min="0" max="10" value="2">
+        <span class="value" id="samples-value">4</span>
+      </label>
+      <label>
+        <span>Resolution</span>
+        <select id="resolution">
+          <option value="0.25">0.25x</option>
+          <option value="0.5">0.5x</option>
+          <option value="1.0">1.0x</option>
+          <option value="2.0">2.0x</option>
+        </select>
+      </label>
+      <label>
+        <span>Temporal</span>
+        <input type="checkbox" id="temporal">
+      </label>
+      <label>
+        <span>Denoise</span>
+        <input type="checkbox" id="denoise" checked>
+      </label>
+    </div>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>

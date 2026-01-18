@@ -23,7 +23,7 @@ export class Renderer {
   private triangles: Triangle[];
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
-  public static readonly RESOLUTION_SCALE = 0.25;
+  public static RESOLUTION_SCALE = 0.25;
   private frameCount: number = 0;
   private nodeCount: number = 0;
   private triangleCount: number = 0;
@@ -60,9 +60,10 @@ export class Renderer {
   // Denoise settings
   private readonly DENOISE_PASSES = 2; // Step sizes: 1, 2, 4, 8, 16
 
-  // Post-processing options
-  private enableTemporalReprojection = false;
-  private enableSpatialDenoise = true;
+  // Post-processing options (public for UI control)
+  public enableTemporalReprojection = false;
+  public enableSpatialDenoise = true;
+  public samplesPerPixel = 4;
 
   constructor(
     device: GPUDevice,
@@ -197,9 +198,9 @@ export class Renderer {
     });
     this.device.queue.writeBuffer(this.bvhBuffer, 0, bvhData);
 
-    // Create scene info buffer (triangle count, node count, frame, bounces)
+    // Create scene info buffer (triangle count, node count, frame, bounces, samples_per_pixel, padding)
     this.sceneInfoBuffer = this.device.createBuffer({
-      size: 16,
+      size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.updateSceneInfoBuffer();
@@ -577,6 +578,10 @@ export class Renderer {
       this.nodeCount,
       this.frameCount,
       4, // max bounces
+      this.samplesPerPixel,
+      0, // padding
+      0, // padding
+      0, // padding
     ]);
     this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, sceneInfo);
   }

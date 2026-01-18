@@ -39,6 +39,10 @@ struct SceneInfo {
   node_count: u32,
   frame: u32,
   max_bounces: u32,
+  samples_per_pixel: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
 }
 
 struct HitInfo {
@@ -279,8 +283,6 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
   return radiance;
 }
 
-const SAMPLES_PER_PIXEL = 128u;
-
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3u) {
   let dims = textureDimensions(output);
@@ -292,11 +294,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   // Initialize RNG
   var rng_state = rand_seed(global_id.xy, scene_info.frame);
 
+  let samples_per_pixel = scene_info.samples_per_pixel;
+
   var color = vec3f(0.0);
   var primary_normal = vec3f(0.0);
   var primary_depth = 1e30;
 
-  for (var s = 0u; s < SAMPLES_PER_PIXEL; s++) {
+  for (var s = 0u; s < samples_per_pixel; s++) {
     // Add sub-pixel jitter for anti-aliasing
     let jitter_x = pcg(&rng_state) - 0.5;
     let jitter_y = pcg(&rng_state) - 0.5;
@@ -322,7 +326,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   }
 
   // Average samples
-  color /= f32(SAMPLES_PER_PIXEL);
+  color /= f32(samples_per_pixel);
 
   // Clamp to prevent fireflies
   color = clamp(color, vec3f(0.0), vec3f(10.0));
