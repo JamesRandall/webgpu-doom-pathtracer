@@ -1,6 +1,8 @@
 import { Renderer } from './renderer';
 import { createCornellBox } from './scene/geometry';
 import { CameraController } from './camera';
+import { WadParser } from './doom/wad-parser';
+import { convertLevelToScene } from './doom/level-converter';
 
 async function main() {
   const errorDiv = document.getElementById('error') as HTMLDivElement;
@@ -38,22 +40,60 @@ async function main() {
     alphaMode: 'premultiplied',
   });
 
-  // Camera inside the Cornell box, looking at back wall
-  const cameraController = new CameraController(
-    { x: 0, y: 0, z: -4.5 },  // position near front of box
-    0,                          // yaw (looking +z toward back wall)
-    0,                          // pitch
-    60,                         // fov
-    3,                          // move speed
-    0.002                       // look sensitivity
-  );
+  // Try to load Doom WAD, fall back to Cornell box
+  let scene;
+  let cameraController: CameraController;
+
+  try {
+    const response = await fetch('/wads/DOOM1.WAD');
+    if (!response.ok) throw new Error('WAD not found');
+    const wadBuffer = await response.arrayBuffer();
+    const wad = new WadParser(wadBuffer);
+
+    console.log('Available levels:', wad.getLevelNames());
+
+    const levelData = wad.parseLevel('E1M1');
+    scene = convertLevelToScene(levelData);
+
+    // Find player start position from THINGS
+    const playerStart = levelData.things.find(t => t.type === 1);  // Type 1 = Player 1 start
+    const startX = playerStart ? playerStart.x / 64 : 0;
+    const startZ = playerStart ? playerStart.y / 64 : 0;
+    const startAngle = playerStart ? (playerStart.angle * Math.PI / 180) : 0;
+
+    // Find floor height at player start
+    const startY = 0.8;  // Approximate eye height
+
+    cameraController = new CameraController(
+      { x: startX, y: startY, z: startZ },
+      startAngle - Math.PI / 2,  // Convert Doom angle to our yaw
+      0,
+      90,   // fov
+      5,    // move speed (faster for larger level)
+      0.002
+    );
+
+    console.log(`Loaded E1M1: ${scene.triangles.length} triangles, ${scene.materials.length} materials`);
+  } catch (e) {
+    console.warn('Failed to load WAD, using Cornell box:', e);
+
+    // Fall back to Cornell box
+    scene = createCornellBox();
+    cameraController = new CameraController(
+      { x: 0, y: 0, z: -4.5 },
+      0,
+      0,
+      60,
+      3,
+      0.002
+    );
+
+    console.log(`Scene: ${scene.triangles.length} triangles, ${scene.materials.length} materials`);
+  }
+
   cameraController.attach(canvas);
 
-  // Create Cornell box scene
-  const triangles = createCornellBox();
-  console.log(`Scene: ${triangles.length} triangles`);
-
-  let renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), triangles);
+  let renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), scene.triangles, scene.materials);
   await renderer.initialize();
 
   // UI Controls
@@ -82,7 +122,7 @@ async function main() {
   // Resolution scale (requires recreating renderer)
   resolutionSelect.addEventListener('change', async () => {
     Renderer.RESOLUTION_SCALE = parseFloat(resolutionSelect.value);
-    renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), triangles);
+    renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), scene.triangles, scene.materials);
     await renderer.initialize();
     // Restore settings
     renderer.samplesPerPixel = Math.pow(2, parseInt(samplesSlider.value));

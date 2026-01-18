@@ -4,13 +4,24 @@ export interface Vec3 {
   z: number;
 }
 
+// Material types
+export const MATERIAL_DIFFUSE = 0;
+export const MATERIAL_SPECULAR = 1;
+export const MATERIAL_EMISSIVE = 2;
+
+export interface Material {
+  albedo: Vec3;
+  emissive: Vec3;
+  roughness: number;
+  materialType: number;  // 0 = diffuse, 1 = specular, 2 = emissive
+}
+
 export interface Triangle {
   v0: Vec3;
   v1: Vec3;
   v2: Vec3;
   normal: Vec3;
-  color: Vec3;
-  emissive: Vec3;
+  materialIndex: number;
 }
 
 function subtract(a: Vec3, b: Vec3): Vec3 {
@@ -37,26 +48,25 @@ function computeNormal(v0: Vec3, v1: Vec3, v2: Vec3): Vec3 {
   return normalize(cross(edge1, edge2));
 }
 
-function createTriangle(v0: Vec3, v1: Vec3, v2: Vec3, color: Vec3, emissive: Vec3 = { x: 0, y: 0, z: 0 }): Triangle {
+function createTriangle(v0: Vec3, v1: Vec3, v2: Vec3, materialIndex: number): Triangle {
   return {
     v0,
     v1,
     v2,
     normal: computeNormal(v0, v1, v2),
-    color,
-    emissive,
+    materialIndex,
   };
 }
 
 // Create a quad from 4 vertices (2 triangles)
-function createQuad(v0: Vec3, v1: Vec3, v2: Vec3, v3: Vec3, color: Vec3, emissive: Vec3 = { x: 0, y: 0, z: 0 }): Triangle[] {
+function createQuad(v0: Vec3, v1: Vec3, v2: Vec3, v3: Vec3, materialIndex: number): Triangle[] {
   return [
-    createTriangle(v0, v1, v2, color, emissive),
-    createTriangle(v0, v2, v3, color, emissive),
+    createTriangle(v0, v1, v2, materialIndex),
+    createTriangle(v0, v2, v3, materialIndex),
   ];
 }
 
-export function createCube(center: Vec3, size: number, color?: Vec3): Triangle[] {
+export function createCube(center: Vec3, size: number, materialIndex: number): Triangle[] {
   const h = size / 2;
   const cx = center.x;
   const cy = center.y;
@@ -73,37 +83,25 @@ export function createCube(center: Vec3, size: number, color?: Vec3): Triangle[]
     { x: cx - h, y: cy + h, z: cz + h },
   ];
 
-  const colors = color
-    ? { front: color, back: color, left: color, right: color, top: color, bottom: color }
-    : {
-        front: { x: 1.0, y: 0.3, z: 0.3 },
-        back: { x: 0.3, y: 1.0, z: 0.3 },
-        left: { x: 0.3, y: 0.3, z: 1.0 },
-        right: { x: 1.0, y: 1.0, z: 0.3 },
-        top: { x: 1.0, y: 0.3, z: 1.0 },
-        bottom: { x: 0.3, y: 1.0, z: 1.0 },
-      };
-
-  const noEmissive = { x: 0, y: 0, z: 0 };
   const triangles: Triangle[] = [];
 
-  triangles.push(createTriangle(vertices[4], vertices[5], vertices[6], colors.front, noEmissive));
-  triangles.push(createTriangle(vertices[4], vertices[6], vertices[7], colors.front, noEmissive));
-  triangles.push(createTriangle(vertices[1], vertices[0], vertices[3], colors.back, noEmissive));
-  triangles.push(createTriangle(vertices[1], vertices[3], vertices[2], colors.back, noEmissive));
-  triangles.push(createTriangle(vertices[0], vertices[4], vertices[7], colors.left, noEmissive));
-  triangles.push(createTriangle(vertices[0], vertices[7], vertices[3], colors.left, noEmissive));
-  triangles.push(createTriangle(vertices[5], vertices[1], vertices[2], colors.right, noEmissive));
-  triangles.push(createTriangle(vertices[5], vertices[2], vertices[6], colors.right, noEmissive));
-  triangles.push(createTriangle(vertices[7], vertices[6], vertices[2], colors.top, noEmissive));
-  triangles.push(createTriangle(vertices[7], vertices[2], vertices[3], colors.top, noEmissive));
-  triangles.push(createTriangle(vertices[0], vertices[1], vertices[5], colors.bottom, noEmissive));
-  triangles.push(createTriangle(vertices[0], vertices[5], vertices[4], colors.bottom, noEmissive));
+  triangles.push(createTriangle(vertices[4], vertices[5], vertices[6], materialIndex));
+  triangles.push(createTriangle(vertices[4], vertices[6], vertices[7], materialIndex));
+  triangles.push(createTriangle(vertices[1], vertices[0], vertices[3], materialIndex));
+  triangles.push(createTriangle(vertices[1], vertices[3], vertices[2], materialIndex));
+  triangles.push(createTriangle(vertices[0], vertices[4], vertices[7], materialIndex));
+  triangles.push(createTriangle(vertices[0], vertices[7], vertices[3], materialIndex));
+  triangles.push(createTriangle(vertices[5], vertices[1], vertices[2], materialIndex));
+  triangles.push(createTriangle(vertices[5], vertices[2], vertices[6], materialIndex));
+  triangles.push(createTriangle(vertices[7], vertices[6], vertices[2], materialIndex));
+  triangles.push(createTriangle(vertices[7], vertices[2], vertices[3], materialIndex));
+  triangles.push(createTriangle(vertices[0], vertices[1], vertices[5], materialIndex));
+  triangles.push(createTriangle(vertices[0], vertices[5], vertices[4], materialIndex));
 
   return triangles;
 }
 
-export function createCubeGrid(gridSize: number, spacing: number, cubeSize: number): Triangle[] {
+export function createCubeGrid(gridSize: number, spacing: number, cubeSize: number, materialIndex: number): Triangle[] {
   const triangles: Triangle[] = [];
   const offset = ((gridSize - 1) * spacing) / 2;
 
@@ -115,12 +113,7 @@ export function createCubeGrid(gridSize: number, spacing: number, cubeSize: numb
           y: y * spacing - offset,
           z: z * spacing - offset,
         };
-        const color = {
-          x: (x + 1) / gridSize,
-          y: (y + 1) / gridSize,
-          z: (z + 1) / gridSize,
-        };
-        triangles.push(...createCube(center, cubeSize, color));
+        triangles.push(...createCube(center, cubeSize, materialIndex));
       }
     }
   }
@@ -128,18 +121,83 @@ export function createCubeGrid(gridSize: number, spacing: number, cubeSize: numb
   return triangles;
 }
 
+// Scene result with both triangles and materials
+export interface SceneData {
+  triangles: Triangle[];
+  materials: Material[];
+}
+
 // Create Cornell box scene
-export function createCornellBox(): Triangle[] {
+export function createCornellBox(): SceneData {
   const triangles: Triangle[] = [];
+  const materials: Material[] = [];
   const size = 5;
   const h = size / 2;
 
-  // Colors
-  const white = { x: 0.73, y: 0.73, z: 0.73 };
-  const red = { x: 0.65, y: 0.05, z: 0.05 };
-  const green = { x: 0.12, y: 0.45, z: 0.15 };
-  const noEmissive = { x: 0, y: 0, z: 0 };
-  const lightEmissive = { x: 40, y: 40, z: 40 };
+  // Define materials
+  // 0: White diffuse
+  materials.push({
+    albedo: { x: 0.73, y: 0.73, z: 0.73 },
+    emissive: { x: 0, y: 0, z: 0 },
+    roughness: 1.0,
+    materialType: MATERIAL_DIFFUSE,
+  });
+
+  // 1: Red diffuse
+  materials.push({
+    albedo: { x: 0.65, y: 0.05, z: 0.05 },
+    emissive: { x: 0, y: 0, z: 0 },
+    roughness: 1.0,
+    materialType: MATERIAL_DIFFUSE,
+  });
+
+  // 2: Green diffuse
+  materials.push({
+    albedo: { x: 0.12, y: 0.45, z: 0.15 },
+    emissive: { x: 0, y: 0, z: 0 },
+    roughness: 1.0,
+    materialType: MATERIAL_DIFFUSE,
+  });
+
+  // 3: Light emissive
+  materials.push({
+    albedo: { x: 1.0, y: 1.0, z: 1.0 },
+    emissive: { x: 40, y: 40, z: 40 },
+    roughness: 1.0,
+    materialType: MATERIAL_EMISSIVE,
+  });
+
+  // 4: Mirror (specular)
+  materials.push({
+    albedo: { x: 0.95, y: 0.95, z: 0.95 },
+    emissive: { x: 0, y: 0, z: 0 },
+    roughness: 0.0,  // Perfect mirror
+    materialType: MATERIAL_SPECULAR,
+  });
+
+  // 5: Glossy metal (slightly rough specular)
+  materials.push({
+    albedo: { x: 0.9, y: 0.7, z: 0.5 },  // Gold-ish color
+    emissive: { x: 0, y: 0, z: 0 },
+    roughness: 0.15,
+    materialType: MATERIAL_SPECULAR,
+  });
+
+  // 6: Slightly reflective white (rough specular)
+  materials.push({
+    albedo: { x: 0.8, y: 0.8, z: 0.8 },
+    emissive: { x: 0, y: 0, z: 0 },
+    roughness: 0.4,
+    materialType: MATERIAL_SPECULAR,
+  });
+
+  const MAT_WHITE = 0;
+  const MAT_RED = 1;
+  const MAT_GREEN = 2;
+  const MAT_LIGHT = 3;
+  const MAT_MIRROR = 4;
+  const MAT_GLOSSY = 5;
+  const MAT_GLOSSY_WHITE = 6;
 
   // Floor (white)
   triangles.push(...createQuad(
@@ -147,7 +205,7 @@ export function createCornellBox(): Triangle[] {
     { x: h, y: -h, z: -h },
     { x: h, y: -h, z: h },
     { x: -h, y: -h, z: h },
-    white, noEmissive
+    MAT_WHITE
   ));
 
   // Ceiling (white)
@@ -156,7 +214,7 @@ export function createCornellBox(): Triangle[] {
     { x: -h, y: h, z: h },
     { x: h, y: h, z: h },
     { x: h, y: h, z: -h },
-    white, noEmissive
+    MAT_WHITE
   ));
 
   // Back wall (white)
@@ -165,7 +223,7 @@ export function createCornellBox(): Triangle[] {
     { x: h, y: -h, z: h },
     { x: h, y: h, z: h },
     { x: -h, y: h, z: h },
-    white, noEmissive
+    MAT_WHITE
   ));
 
   // Left wall (red)
@@ -174,7 +232,7 @@ export function createCornellBox(): Triangle[] {
     { x: -h, y: -h, z: h },
     { x: -h, y: h, z: h },
     { x: -h, y: h, z: -h },
-    red, noEmissive
+    MAT_RED
   ));
 
   // Right wall (green)
@@ -183,7 +241,7 @@ export function createCornellBox(): Triangle[] {
     { x: h, y: -h, z: -h },
     { x: h, y: h, z: -h },
     { x: h, y: h, z: h },
-    green, noEmissive
+    MAT_GREEN
   ));
 
   // Light on ceiling (emissive white quad, slightly smaller and lower than ceiling)
@@ -194,31 +252,31 @@ export function createCornellBox(): Triangle[] {
     { x: -lightSize / 2, y: lightY, z: lightSize / 2 },
     { x: lightSize / 2, y: lightY, z: lightSize / 2 },
     { x: lightSize / 2, y: lightY, z: -lightSize / 2 },
-    white, lightEmissive
+    MAT_LIGHT
   ));
 
-  // Tall box (white)
+  // Tall box (mirror/specular, but front face is slightly glossy)
   const tallBoxCenter = { x: -1.0, y: -h + 1.5, z: 0.5 };
   const tallBoxSize = 1.5;
   const tallBoxHeight = 3.0;
-  triangles.push(...createBox(tallBoxCenter, tallBoxSize, tallBoxSize, tallBoxHeight, white, 0.3));
+  triangles.push(...createBox(tallBoxCenter, tallBoxSize, tallBoxSize, tallBoxHeight, MAT_MIRROR, 0.3, MAT_GLOSSY_WHITE));
 
-  // Short box (white)
+  // Short box (glossy metal)
   const shortBoxCenter = { x: 1.0, y: -h + 0.75, z: -0.5 };
   const shortBoxSize = 1.5;
   const shortBoxHeight = 1.5;
-  triangles.push(...createBox(shortBoxCenter, shortBoxSize, shortBoxSize, shortBoxHeight, white, -0.25));
+  triangles.push(...createBox(shortBoxCenter, shortBoxSize, shortBoxSize, shortBoxHeight, MAT_GLOSSY, -0.25));
 
-  return triangles;
+  return { triangles, materials };
 }
 
 // Create a box with rotation around Y axis
-function createBox(center: Vec3, width: number, depth: number, height: number, color: Vec3, rotationY: number): Triangle[] {
+// Optional frontMaterialIndex allows a different material for the front face
+function createBox(center: Vec3, width: number, depth: number, height: number, materialIndex: number, rotationY: number, frontMaterialIndex?: number): Triangle[] {
   const triangles: Triangle[] = [];
   const hw = width / 2;
   const hd = depth / 2;
   const hh = height / 2;
-  const noEmissive = { x: 0, y: 0, z: 0 };
 
   const cos = Math.cos(rotationY);
   const sin = Math.sin(rotationY);
@@ -251,28 +309,31 @@ function createBox(center: Vec3, width: number, depth: number, height: number, c
     vertex(-hw, hh, hd),   // 7
   ];
 
-  // Front face
-  triangles.push(...createQuad(v[3], v[2], v[6], v[7], color, noEmissive));
+  const frontMat = frontMaterialIndex ?? materialIndex;
+
+  // Front face (facing -Z before rotation, visible to camera)
+  triangles.push(...createQuad(v[1], v[0], v[4], v[5], frontMat));
   // Back face
-  triangles.push(...createQuad(v[1], v[0], v[4], v[5], color, noEmissive));
+  triangles.push(...createQuad(v[3], v[2], v[6], v[7], materialIndex));
   // Left face
-  triangles.push(...createQuad(v[0], v[3], v[7], v[4], color, noEmissive));
+  triangles.push(...createQuad(v[0], v[3], v[7], v[4], materialIndex));
   // Right face
-  triangles.push(...createQuad(v[2], v[1], v[5], v[6], color, noEmissive));
+  triangles.push(...createQuad(v[2], v[1], v[5], v[6], materialIndex));
   // Top face
-  triangles.push(...createQuad(v[7], v[6], v[5], v[4], color, noEmissive));
+  triangles.push(...createQuad(v[7], v[6], v[5], v[4], materialIndex));
   // Bottom face (usually not visible)
-  triangles.push(...createQuad(v[0], v[1], v[2], v[3], color, noEmissive));
+  triangles.push(...createQuad(v[0], v[1], v[2], v[3], materialIndex));
 
   return triangles;
 }
 
 // Pack triangles into a Float32Array for GPU upload
-// Layout per triangle: v0(3)+pad + v1(3)+pad + v2(3)+pad + normal(3)+pad + color(3)+pad + emissive(3)+pad = 24 floats
+// Layout per triangle: v0(3)+pad + v1(3)+pad + v2(3)+pad + normal(3)+materialIndex = 16 floats
 export function packTriangles(triangles: Triangle[]): Float32Array {
-  const floatsPerTriangle = 24;
+  const floatsPerTriangle = 16;
   const buffer = new ArrayBuffer(triangles.length * floatsPerTriangle * 4);
   const data = new Float32Array(buffer);
+  const dataUint = new Uint32Array(buffer);
 
   for (let i = 0; i < triangles.length; i++) {
     const t = triangles[i];
@@ -296,17 +357,33 @@ export function packTriangles(triangles: Triangle[]): Float32Array {
     data[offset + 12] = t.normal.x;
     data[offset + 13] = t.normal.y;
     data[offset + 14] = t.normal.z;
-    data[offset + 15] = 0;
+    dataUint[offset + 15] = t.materialIndex;
+  }
 
-    data[offset + 16] = t.color.x;
-    data[offset + 17] = t.color.y;
-    data[offset + 18] = t.color.z;
-    data[offset + 19] = 0;
+  return data;
+}
 
-    data[offset + 20] = t.emissive.x;
-    data[offset + 21] = t.emissive.y;
-    data[offset + 22] = t.emissive.z;
-    data[offset + 23] = 0;
+// Pack materials into a Float32Array for GPU upload
+// Layout per material: albedo(3)+roughness + emissive(3)+materialType = 8 floats
+export function packMaterials(materials: Material[]): Float32Array {
+  const floatsPerMaterial = 8;
+  const buffer = new ArrayBuffer(materials.length * floatsPerMaterial * 4);
+  const data = new Float32Array(buffer);
+  const dataUint = new Uint32Array(buffer);
+
+  for (let i = 0; i < materials.length; i++) {
+    const m = materials[i];
+    const offset = i * floatsPerMaterial;
+
+    data[offset + 0] = m.albedo.x;
+    data[offset + 1] = m.albedo.y;
+    data[offset + 2] = m.albedo.z;
+    data[offset + 3] = m.roughness;
+
+    data[offset + 4] = m.emissive.x;
+    data[offset + 5] = m.emissive.y;
+    data[offset + 6] = m.emissive.z;
+    dataUint[offset + 7] = m.materialType;
   }
 
   return data;

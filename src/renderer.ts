@@ -1,7 +1,7 @@
 import raytraceShaderCode from './shaders/raytrace.wgsl?raw';
 import denoiseShaderCode from './shaders/denoise.wgsl?raw';
 import temporalShaderCode from './shaders/temporal.wgsl?raw';
-import { Triangle, packTriangles } from './scene/geometry';
+import { Triangle, Material, packTriangles, packMaterials } from './scene/geometry';
 import { BVHBuilder, flattenBVH, packBVHNodes } from './bvh/builder';
 
 export interface Camera {
@@ -21,6 +21,7 @@ export class Renderer {
   private renderHeight: number;
   private camera: Camera;
   private triangles: Triangle[];
+  private materials: Material[];
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
   public static RESOLUTION_SCALE = 0.25;
@@ -45,6 +46,7 @@ export class Renderer {
   private renderBindGroup!: GPUBindGroup;
   private cameraBuffer!: GPUBuffer;
   private triangleBuffer!: GPUBuffer;
+  private materialBuffer!: GPUBuffer;
   private bvhBuffer!: GPUBuffer;
   private sceneInfoBuffer!: GPUBuffer;
   private temporalParamsBuffer!: GPUBuffer;
@@ -63,7 +65,7 @@ export class Renderer {
   // Post-processing options (public for UI control)
   public enableTemporalReprojection = false;
   public enableSpatialDenoise = true;
-  public samplesPerPixel = 4;
+  public samplesPerPixel = 16;
 
   constructor(
     device: GPUDevice,
@@ -72,7 +74,8 @@ export class Renderer {
     width: number,
     height: number,
     camera: Camera,
-    triangles: Triangle[]
+    triangles: Triangle[],
+    materials: Material[]
   ) {
     this.device = device;
     this.context = context;
@@ -83,6 +86,7 @@ export class Renderer {
     this.renderHeight = Math.floor(height * Renderer.RESOLUTION_SCALE);
     this.camera = camera;
     this.triangles = triangles;
+    this.materials = materials;
     console.log(`Render resolution: ${this.renderWidth}x${this.renderHeight} (${Renderer.RESOLUTION_SCALE}x scale)`);
   }
 
@@ -191,6 +195,15 @@ export class Renderer {
     });
     this.device.queue.writeBuffer(this.triangleBuffer, 0, triangleData.buffer);
 
+    // Create material storage buffer
+    const materialData = packMaterials(this.materials);
+    this.materialBuffer = this.device.createBuffer({
+      size: Math.max(materialData.byteLength, 32),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.materialBuffer, 0, materialData.buffer);
+    console.log(`Materials: ${this.materials.length}`);
+
     // Create BVH storage buffer
     this.bvhBuffer = this.device.createBuffer({
       size: Math.max(bvhData.byteLength, 32),
@@ -240,10 +253,15 @@ export class Renderer {
         {
           binding: 4,
           visibility: GPUShaderStage.COMPUTE,
-          buffer: { type: 'uniform' },
+          buffer: { type: 'read-only-storage' },
         },
         {
           binding: 5,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'uniform' },
+        },
+        {
+          binding: 6,
           visibility: GPUShaderStage.COMPUTE,
           storageTexture: {
             access: 'write-only',
@@ -252,7 +270,7 @@ export class Renderer {
           },
         },
         {
-          binding: 6,
+          binding: 7,
           visibility: GPUShaderStage.COMPUTE,
           storageTexture: {
             access: 'write-only',
@@ -291,18 +309,22 @@ export class Renderer {
         },
         {
           binding: 3,
-          resource: { buffer: this.bvhBuffer },
+          resource: { buffer: this.materialBuffer },
         },
         {
           binding: 4,
-          resource: { buffer: this.sceneInfoBuffer },
+          resource: { buffer: this.bvhBuffer },
         },
         {
           binding: 5,
-          resource: this.normalTexture.createView(),
+          resource: { buffer: this.sceneInfoBuffer },
         },
         {
           binding: 6,
+          resource: this.normalTexture.createView(),
+        },
+        {
+          binding: 7,
           resource: this.depthTexture.createView(),
         },
       ],

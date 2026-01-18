@@ -1,5 +1,10 @@
 const PI = 3.14159265359;
 
+// Material types
+const MATERIAL_DIFFUSE = 0u;
+const MATERIAL_SPECULAR = 1u;
+const MATERIAL_EMISSIVE = 2u;
+
 struct Camera {
   position: vec3f,
   _pad0: f32,
@@ -20,11 +25,14 @@ struct Triangle {
   v2: vec3f,
   _pad2: f32,
   normal: vec3f,
-  _pad3: f32,
-  color: vec3f,
-  _pad4: f32,
+  material_index: u32,
+}
+
+struct Material {
+  albedo: vec3f,
+  roughness: f32,
   emissive: vec3f,
-  _pad5: f32,
+  material_type: u32,
 }
 
 struct BVHNode {
@@ -48,18 +56,18 @@ struct SceneInfo {
 struct HitInfo {
   t: f32,
   normal: vec3f,
-  color: vec3f,
-  emissive: vec3f,
+  material_index: u32,
   hit: bool,
 }
 
 @group(0) @binding(0) var output: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(1) var<uniform> camera: Camera;
 @group(0) @binding(2) var<storage, read> triangles: array<Triangle>;
-@group(0) @binding(3) var<storage, read> bvh_nodes: array<BVHNode>;
-@group(0) @binding(4) var<uniform> scene_info: SceneInfo;
-@group(0) @binding(5) var output_normal: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(6) var output_depth: texture_storage_2d<r32float, write>;
+@group(0) @binding(3) var<storage, read> materials: array<Material>;
+@group(0) @binding(4) var<storage, read> bvh_nodes: array<BVHNode>;
+@group(0) @binding(5) var<uniform> scene_info: SceneInfo;
+@group(0) @binding(6) var output_normal: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(7) var output_depth: texture_storage_2d<r32float, write>;
 
 const MAX_STACK_SIZE = 32u;
 const LEAF_FLAG = 0x80000000u;
@@ -96,6 +104,68 @@ fn cosine_hemisphere(normal: vec3f, r1: f32, r2: f32) -> vec3f {
   let bitangent = cross(normal, tangent);
 
   return tangent * x + bitangent * y + normal * z;
+}
+
+// Build orthonormal basis from normal
+fn build_basis(normal: vec3f) -> mat3x3f {
+  var tangent: vec3f;
+  if (abs(normal.y) > 0.999) {
+    tangent = normalize(cross(vec3f(1.0, 0.0, 0.0), normal));
+  } else {
+    tangent = normalize(cross(vec3f(0.0, 1.0, 0.0), normal));
+  }
+  let bitangent = cross(normal, tangent);
+  return mat3x3f(tangent, bitangent, normal);
+}
+
+// GGX normal distribution function
+fn ggx_d(n_dot_h: f32, roughness: f32) -> f32 {
+  let a = roughness * roughness;
+  let a2 = a * a;
+  let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+  return a2 / (PI * d * d);
+}
+
+// GGX geometry function (Smith)
+fn ggx_g1(n_dot_v: f32, roughness: f32) -> f32 {
+  let k = roughness * roughness / 2.0;
+  return n_dot_v / (n_dot_v * (1.0 - k) + k);
+}
+
+fn ggx_g(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
+  return ggx_g1(n_dot_v, roughness) * ggx_g1(n_dot_l, roughness);
+}
+
+// Fresnel-Schlick approximation
+fn fresnel_schlick(cos_theta: f32, f0: vec3f) -> vec3f {
+  return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
+}
+
+// Sample GGX distribution (importance sampling)
+fn sample_ggx(normal: vec3f, roughness: f32, r1: f32, r2: f32) -> vec3f {
+  let a = roughness * roughness;
+  let a2 = a * a;
+
+  // Sample spherical coordinates
+  let phi = 2.0 * PI * r1;
+  let cos_theta = sqrt((1.0 - r2) / (1.0 + (a2 - 1.0) * r2));
+  let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+
+  // Convert to Cartesian in tangent space
+  let h_local = vec3f(
+    cos(phi) * sin_theta,
+    sin(phi) * sin_theta,
+    cos_theta
+  );
+
+  // Transform to world space
+  let basis = build_basis(normal);
+  return normalize(basis * h_local);
+}
+
+// Reflect direction around normal
+fn reflect_dir(incident: vec3f, normal: vec3f) -> vec3f {
+  return incident - 2.0 * dot(incident, normal) * normal;
 }
 
 // Ray-Triangle intersection using Moller-Trumbore algorithm
@@ -157,7 +227,7 @@ fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   var closest_hit: HitInfo;
   closest_hit.t = 1e30;
   closest_hit.hit = false;
-  closest_hit.emissive = vec3f(0.0);
+  closest_hit.material_index = 0u;
 
   if (scene_info.node_count == 0u) {
     return closest_hit;
@@ -192,8 +262,7 @@ fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
         if (t > 0.0 && t < closest_hit.t) {
           closest_hit.t = t;
           closest_hit.normal = tri.normal;
-          closest_hit.color = tri.color;
-          closest_hit.emissive = tri.emissive;
+          closest_hit.material_index = tri.material_index;
           closest_hit.hit = true;
         }
       }
@@ -245,11 +314,85 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       break;
     }
 
-    // Add emissive contribution
-    radiance += throughput * hit.emissive;
+    // Get material properties
+    let mat = materials[hit.material_index];
 
-    // Update throughput with surface albedo
-    throughput *= hit.color;
+    // Add emissive contribution
+    radiance += throughput * mat.emissive;
+
+    // Calculate hit position
+    let hit_pos = ray_origin + ray_dir * hit.t;
+
+    // Ensure we're on the correct side of the surface
+    var normal = hit.normal;
+    if (dot(ray_dir, normal) > 0.0) {
+      normal = -normal;
+    }
+
+    // Handle different material types
+    if (mat.material_type == MATERIAL_EMISSIVE) {
+      // Pure emissive surface - stop tracing
+      break;
+    } else if (mat.material_type == MATERIAL_SPECULAR) {
+      // Specular/metallic material with GGX microfacet model
+      let roughness = max(mat.roughness, 0.001);  // Clamp to avoid singularities
+
+      if (roughness < 0.01) {
+        // Perfect mirror reflection
+        ray_dir = reflect_dir(ray_dir, normal);
+        throughput *= mat.albedo;
+      } else {
+        // GGX importance sampling
+        let r1 = pcg(rng_state);
+        let r2 = pcg(rng_state);
+
+        // Sample microfacet normal (half vector)
+        let h = sample_ggx(normal, roughness, r1, r2);
+
+        // Reflect view direction around half vector
+        let new_dir = reflect_dir(ray_dir, h);
+
+        // Check if reflection is valid (above surface)
+        if (dot(new_dir, normal) <= 0.0) {
+          break;
+        }
+
+        // Calculate BRDF terms
+        let n_dot_l = max(dot(normal, new_dir), 0.001);
+        let n_dot_v = max(dot(normal, -ray_dir), 0.001);
+        let n_dot_h = max(dot(normal, h), 0.001);
+        let v_dot_h = max(dot(-ray_dir, h), 0.001);
+
+        // Fresnel (using albedo as F0 for metals)
+        let f = fresnel_schlick(v_dot_h, mat.albedo);
+
+        // Geometry term
+        let g = ggx_g(n_dot_v, n_dot_l, roughness);
+
+        // For importance sampling GGX, the weight is:
+        // f * g * v_dot_h / (n_dot_h * n_dot_v)
+        let weight = f * g * v_dot_h / (n_dot_h * n_dot_v);
+
+        throughput *= weight;
+        ray_dir = new_dir;
+      }
+
+      ray_origin = hit_pos + normal * 0.001;
+    } else {
+      // Diffuse material (MATERIAL_DIFFUSE)
+      // Update throughput with surface albedo
+      throughput *= mat.albedo;
+
+      ray_origin = hit_pos + normal * 0.001;
+
+      // Sample new direction (cosine-weighted hemisphere)
+      let r1 = pcg(rng_state);
+      let r2 = pcg(rng_state);
+      ray_dir = cosine_hemisphere(normal, r1, r2);
+
+      // For cosine-weighted sampling, the PDF cancels with the cosine term in rendering equation
+      // So we don't need to explicitly multiply by cos(theta) / PDF
+    }
 
     // Russian roulette for path termination (after a few bounces)
     if (bounce > 2u) {
@@ -259,25 +402,6 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       }
       throughput /= p;
     }
-
-    // Calculate hit position and offset slightly along normal
-    let hit_pos = ray_origin + ray_dir * hit.t;
-
-    // Ensure we're on the correct side of the surface
-    var normal = hit.normal;
-    if (dot(ray_dir, normal) > 0.0) {
-      normal = -normal;
-    }
-
-    ray_origin = hit_pos + normal * 0.001;
-
-    // Sample new direction (cosine-weighted hemisphere)
-    let r1 = pcg(rng_state);
-    let r2 = pcg(rng_state);
-    ray_dir = cosine_hemisphere(normal, r1, r2);
-
-    // For cosine-weighted sampling, the PDF cancels with the cosine term in rendering equation
-    // So we don't need to explicitly multiply by cos(theta) / PDF
   }
 
   return radiance;

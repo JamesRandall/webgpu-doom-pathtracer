@@ -68,9 +68,9 @@ export class CameraController {
     };
 
     const right = {
-      x: Math.cos(this.yaw),
+      x: -Math.cos(this.yaw),
       y: 0,
-      z: -Math.sin(this.yaw),
+      z: Math.sin(this.yaw),
     };
 
     const speed = this.moveSpeed * deltaTime;
@@ -99,6 +99,15 @@ export class CameraController {
     }
     if (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) {
       this.position.y -= speed;
+    }
+
+    // Rotation (Q/E)
+    const rotateSpeed = 2.0 * deltaTime;  // radians per second
+    if (this.keys.has('KeyQ')) {
+      this.yaw += rotateSpeed;
+    }
+    if (this.keys.has('KeyE')) {
+      this.yaw -= rotateSpeed;
     }
   }
 
