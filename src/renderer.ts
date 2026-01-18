@@ -1,5 +1,6 @@
 import raytraceShaderCode from './shaders/raytrace.wgsl?raw';
 import denoiseShaderCode from './shaders/denoise.wgsl?raw';
+import temporalShaderCode from './shaders/temporal.wgsl?raw';
 import { Triangle, packTriangles } from './scene/geometry';
 import { BVHBuilder, flattenBVH, packBVHNodes } from './bvh/builder';
 
@@ -14,37 +15,54 @@ export class Renderer {
   private device: GPUDevice;
   private context: GPUCanvasContext;
   private format: GPUTextureFormat;
-  private width: number;
-  private height: number;
+  private canvasWidth: number;
+  private canvasHeight: number;
+  private renderWidth: number;
+  private renderHeight: number;
   private camera: Camera;
   private triangles: Triangle[];
+
+  // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
+  public static readonly RESOLUTION_SCALE = 0.25;
   private frameCount: number = 0;
   private nodeCount: number = 0;
   private triangleCount: number = 0;
 
   private computePipeline!: GPUComputePipeline;
+  private temporalPipeline!: GPUComputePipeline;
   private denoisePipeline!: GPUComputePipeline;
   private renderPipeline!: GPURenderPipeline;
   private outputTexture!: GPUTexture;
+  private temporalOutputTexture!: GPUTexture;
   private denoisedTexture!: GPUTexture;
-  private accumulationTexture!: GPUTexture;
   private normalTexture!: GPUTexture;
   private depthTexture!: GPUTexture;
+  private historyColorTexture!: GPUTexture;
+  private historyDepthTexture!: GPUTexture;
   private computeBindGroup!: GPUBindGroup;
+  private temporalBindGroup!: GPUBindGroup;
   private denoiseBindGroups!: GPUBindGroup[];
   private renderBindGroup!: GPUBindGroup;
   private cameraBuffer!: GPUBuffer;
   private triangleBuffer!: GPUBuffer;
   private bvhBuffer!: GPUBuffer;
   private sceneInfoBuffer!: GPUBuffer;
+  private temporalParamsBuffer!: GPUBuffer;
+  private cameraMatricesBuffer!: GPUBuffer;
   private sampler!: GPUSampler;
   private denoiseParamsBuffer!: GPUBuffer;
   private pingPongTexture!: GPUTexture;
-  private lastCameraPosition = { x: 0, y: 0, z: 0 };
-  private lastCameraDirection = { x: 0, y: 0, z: 1 };
+
+  // Previous frame camera for temporal reprojection
+  private prevCamera: Camera | null = null;
+  private staticFrameCount: number = 0;
 
   // Denoise settings
-  private readonly DENOISE_PASSES = 5; // Step sizes: 1, 2, 4, 8, 16
+  private readonly DENOISE_PASSES = 2; // Step sizes: 1, 2, 4, 8, 16
+
+  // Post-processing options
+  private enableTemporalReprojection = false;
+  private enableSpatialDenoise = true;
 
   constructor(
     device: GPUDevice,
@@ -58,10 +76,13 @@ export class Renderer {
     this.device = device;
     this.context = context;
     this.format = format;
-    this.width = width;
-    this.height = height;
+    this.canvasWidth = width;
+    this.canvasHeight = height;
+    this.renderWidth = Math.floor(width * Renderer.RESOLUTION_SCALE);
+    this.renderHeight = Math.floor(height * Renderer.RESOLUTION_SCALE);
     this.camera = camera;
     this.triangles = triangles;
+    console.log(`Render resolution: ${this.renderWidth}x${this.renderHeight} (${Renderer.RESOLUTION_SCALE}x scale)`);
   }
 
   async initialize(): Promise<void> {
@@ -76,9 +97,9 @@ export class Renderer {
 
     console.log(`BVH built: ${nodes.length} nodes for ${orderedTriangles.length} triangles`);
 
-    // Create output storage texture
+    // Create output storage texture (raw path trace output)
     this.outputTexture = this.device.createTexture({
-      size: { width: this.width, height: this.height },
+      size: { width: this.renderWidth, height: this.renderHeight },
       format: 'rgba16float',
       usage:
         GPUTextureUsage.STORAGE_BINDING |
@@ -86,19 +107,38 @@ export class Renderer {
         GPUTextureUsage.COPY_SRC,
     });
 
-    // Create accumulation texture for temporal averaging
-    this.accumulationTexture = this.device.createTexture({
-      size: { width: this.width, height: this.height },
+    // Create temporal output texture (after temporal reprojection)
+    this.temporalOutputTexture = this.device.createTexture({
+      size: { width: this.renderWidth, height: this.renderHeight },
       format: 'rgba16float',
       usage:
         GPUTextureUsage.STORAGE_BINDING |
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_SRC |
+        GPUTextureUsage.COPY_DST,
+    });
+
+    // History colour buffer for temporal reprojection
+    this.historyColorTexture = this.device.createTexture({
+      size: { width: this.renderWidth, height: this.renderHeight },
+      format: 'rgba16float',
+      usage:
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_DST,
+    });
+
+    // History depth buffer for temporal reprojection
+    this.historyDepthTexture = this.device.createTexture({
+      size: { width: this.renderWidth, height: this.renderHeight },
+      format: 'r32float',
+      usage:
         GPUTextureUsage.TEXTURE_BINDING |
         GPUTextureUsage.COPY_DST,
     });
 
     // Create denoised texture (output of denoise pass)
     this.denoisedTexture = this.device.createTexture({
-      size: { width: this.width, height: this.height },
+      size: { width: this.renderWidth, height: this.renderHeight },
       format: 'rgba16float',
       usage:
         GPUTextureUsage.STORAGE_BINDING |
@@ -108,7 +148,7 @@ export class Renderer {
 
     // G-buffer: normals
     this.normalTexture = this.device.createTexture({
-      size: { width: this.width, height: this.height },
+      size: { width: this.renderWidth, height: this.renderHeight },
       format: 'rgba16float',
       usage:
         GPUTextureUsage.STORAGE_BINDING |
@@ -117,16 +157,17 @@ export class Renderer {
 
     // G-buffer: depth
     this.depthTexture = this.device.createTexture({
-      size: { width: this.width, height: this.height },
+      size: { width: this.renderWidth, height: this.renderHeight },
       format: 'r32float',
       usage:
         GPUTextureUsage.STORAGE_BINDING |
-        GPUTextureUsage.TEXTURE_BINDING,
+        GPUTextureUsage.TEXTURE_BINDING |
+        GPUTextureUsage.COPY_SRC,
     });
 
     // Ping-pong texture for denoise passes
     this.pingPongTexture = this.device.createTexture({
-      size: { width: this.width, height: this.height },
+      size: { width: this.renderWidth, height: this.renderHeight },
       format: 'rgba16float',
       usage:
         GPUTextureUsage.STORAGE_BINDING |
@@ -203,11 +244,6 @@ export class Renderer {
         {
           binding: 5,
           visibility: GPUShaderStage.COMPUTE,
-          texture: { sampleType: 'float', viewDimension: '2d' },
-        },
-        {
-          binding: 6,
-          visibility: GPUShaderStage.COMPUTE,
           storageTexture: {
             access: 'write-only',
             format: 'rgba16float',
@@ -215,7 +251,7 @@ export class Renderer {
           },
         },
         {
-          binding: 7,
+          binding: 6,
           visibility: GPUShaderStage.COMPUTE,
           storageTexture: {
             access: 'write-only',
@@ -262,16 +298,61 @@ export class Renderer {
         },
         {
           binding: 5,
-          resource: this.accumulationTexture.createView(),
-        },
-        {
-          binding: 6,
           resource: this.normalTexture.createView(),
         },
         {
-          binding: 7,
+          binding: 6,
           resource: this.depthTexture.createView(),
         },
+      ],
+    });
+
+    // Create temporal reprojection params buffer
+    this.temporalParamsBuffer = this.device.createBuffer({
+      size: 32, // screen_width, screen_height, blend_factor, depth_threshold, static_frame_count, padding...
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Create camera matrices buffer (inv_view_proj + prev_view_proj = 2 * 64 bytes)
+    this.cameraMatricesBuffer = this.device.createBuffer({
+      size: 128,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    // Create temporal reprojection pipeline
+    const temporalShaderModule = this.device.createShaderModule({
+      code: temporalShaderCode,
+    });
+
+    const temporalBindGroupLayout = this.device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float', viewDimension: '2d' } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      ],
+    });
+
+    this.temporalPipeline = this.device.createComputePipeline({
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [temporalBindGroupLayout] }),
+      compute: { module: temporalShaderModule, entryPoint: 'main' },
+    });
+
+    this.temporalBindGroup = this.device.createBindGroup({
+      layout: temporalBindGroupLayout,
+      entries: [
+        { binding: 0, resource: this.outputTexture.createView() },
+        { binding: 1, resource: this.depthTexture.createView() },
+        { binding: 2, resource: this.normalTexture.createView() },
+        { binding: 3, resource: this.historyColorTexture.createView() },
+        { binding: 4, resource: this.historyDepthTexture.createView() },
+        { binding: 5, resource: this.temporalOutputTexture.createView() },
+        { binding: 6, resource: { buffer: this.temporalParamsBuffer } },
+        { binding: 7, resource: { buffer: this.cameraMatricesBuffer } },
       ],
     });
 
@@ -331,15 +412,15 @@ export class Renderer {
       },
     });
 
-    // Create denoise bind groups for ping-pong (output -> pingPong, pingPong -> denoised)
+    // Create denoise bind groups for ping-pong (temporalOutput -> pingPong, pingPong -> denoised)
     // We need 2 * DENOISE_PASSES bind groups for alternating input/output
     this.denoiseBindGroups = [];
 
-    // First pass: output -> pingPong
+    // First pass: temporalOutput -> pingPong
     this.denoiseBindGroups.push(this.device.createBindGroup({
       layout: denoiseBindGroupLayout,
       entries: [
-        { binding: 0, resource: this.outputTexture.createView() },
+        { binding: 0, resource: this.temporalOutputTexture.createView() },
         { binding: 1, resource: this.normalTexture.createView() },
         { binding: 2, resource: this.depthTexture.createView() },
         { binding: 3, resource: this.pingPongTexture.createView() },
@@ -409,7 +490,9 @@ export class Renderer {
 
         @fragment
         fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
-          let color = textureSample(outputTex, outputSampler, uv).rgb;
+          var color = textureSample(outputTex, outputSampler, uv).rgb;
+          // Exposure adjustment
+          color *= 1.5;
           // Simple tone mapping (Reinhard) and gamma correction
           let mapped = color / (color + vec3f(1.0));
           let gamma_corrected = pow(mapped, vec3f(1.0 / 2.2));
@@ -480,8 +563,8 @@ export class Renderer {
       this.camera.up.y,
       this.camera.up.z,
       0,
-      this.width,
-      this.height,
+      this.renderWidth,
+      this.renderHeight,
       this.camera.fov * (Math.PI / 180),
       0,
     ]);
@@ -498,21 +581,138 @@ export class Renderer {
     this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, sceneInfo);
   }
 
-  updateCamera(camera: Camera): void {
-    // Check if camera moved - reset accumulation if so
-    const posChanged =
-      Math.abs(camera.position.x - this.lastCameraPosition.x) > 0.0001 ||
-      Math.abs(camera.position.y - this.lastCameraPosition.y) > 0.0001 ||
-      Math.abs(camera.position.z - this.lastCameraPosition.z) > 0.0001;
-    const dirChanged =
-      Math.abs(camera.direction.x - this.lastCameraDirection.x) > 0.0001 ||
-      Math.abs(camera.direction.y - this.lastCameraDirection.y) > 0.0001 ||
-      Math.abs(camera.direction.z - this.lastCameraDirection.z) > 0.0001;
+  // Build view matrix from camera
+  private buildViewMatrix(cam: Camera): Float32Array {
+    const forward = this.normalize3([cam.direction.x, cam.direction.y, cam.direction.z]);
+    const right = this.normalize3(this.cross3(forward, [cam.up.x, cam.up.y, cam.up.z]));
+    const up = this.cross3(right, forward);
 
-    if (posChanged || dirChanged) {
-      this.frameCount = 0;
-      this.lastCameraPosition = { ...camera.position };
-      this.lastCameraDirection = { ...camera.direction };
+    // View matrix (camera transform inverse)
+    return new Float32Array([
+      right[0], up[0], -forward[0], 0,
+      right[1], up[1], -forward[1], 0,
+      right[2], up[2], -forward[2], 0,
+      -this.dot3(right, [cam.position.x, cam.position.y, cam.position.z]),
+      -this.dot3(up, [cam.position.x, cam.position.y, cam.position.z]),
+      this.dot3(forward, [cam.position.x, cam.position.y, cam.position.z]),
+      1,
+    ]);
+  }
+
+  // Build projection matrix
+  private buildProjectionMatrix(fovRadians: number, aspect: number, near: number, far: number): Float32Array {
+    const f = 1.0 / Math.tan(fovRadians / 2);
+    const rangeInv = 1.0 / (near - far);
+
+    return new Float32Array([
+      f / aspect, 0, 0, 0,
+      0, f, 0, 0,
+      0, 0, (near + far) * rangeInv, -1,
+      0, 0, near * far * rangeInv * 2, 0,
+    ]);
+  }
+
+  // Matrix multiplication (4x4)
+  private multiplyMatrices(a: Float32Array, b: Float32Array): Float32Array {
+    const result = new Float32Array(16);
+    for (let i = 0; i < 4; i++) {
+      for (let j = 0; j < 4; j++) {
+        result[i * 4 + j] =
+          a[i * 4 + 0] * b[0 * 4 + j] +
+          a[i * 4 + 1] * b[1 * 4 + j] +
+          a[i * 4 + 2] * b[2 * 4 + j] +
+          a[i * 4 + 3] * b[3 * 4 + j];
+      }
+    }
+    return result;
+  }
+
+  // Matrix inverse (4x4)
+  private invertMatrix(m: Float32Array): Float32Array {
+    const inv = new Float32Array(16);
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+
+    const det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (Math.abs(det) < 1e-10) {
+      return new Float32Array(16); // Return identity-ish on failure
+    }
+
+    const detInv = 1.0 / det;
+    for (let i = 0; i < 16; i++) {
+      inv[i] *= detInv;
+    }
+    return inv;
+  }
+
+  // Vector helpers
+  private normalize3(v: number[]): number[] {
+    const len = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
+  }
+
+  private cross3(a: number[], b: number[]): number[] {
+    return [
+      a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2],
+      a[0] * b[1] - a[1] * b[0],
+    ];
+  }
+
+  private dot3(a: number[], b: number[]): number {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  }
+
+  // Build view-projection matrix for a camera
+  private buildViewProjMatrix(cam: Camera): Float32Array {
+    const view = this.buildViewMatrix(cam);
+    const fovRad = cam.fov * (Math.PI / 180);
+    const aspect = this.renderWidth / this.renderHeight;
+    const proj = this.buildProjectionMatrix(fovRad, aspect, 0.1, 1000);
+    return this.multiplyMatrices(proj, view);
+  }
+
+  updateCamera(camera: Camera): void {
+    // Check if camera moved
+    if (this.prevCamera !== null) {
+      const posChanged =
+        Math.abs(camera.position.x - this.prevCamera.position.x) > 0.0001 ||
+        Math.abs(camera.position.y - this.prevCamera.position.y) > 0.0001 ||
+        Math.abs(camera.position.z - this.prevCamera.position.z) > 0.0001;
+      const dirChanged =
+        Math.abs(camera.direction.x - this.prevCamera.direction.x) > 0.0001 ||
+        Math.abs(camera.direction.y - this.prevCamera.direction.y) > 0.0001 ||
+        Math.abs(camera.direction.z - this.prevCamera.direction.z) > 0.0001;
+
+      if (posChanged || dirChanged) {
+        this.staticFrameCount = 0;
+      } else {
+        this.staticFrameCount++;
+      }
+    }
+
+    // Store previous camera for temporal reprojection (before updating)
+    if (this.prevCamera === null) {
+      this.prevCamera = {
+        position: { ...camera.position },
+        direction: { ...camera.direction },
+        up: { ...camera.up },
+        fov: camera.fov,
+      };
     }
 
     this.camera = camera;
@@ -524,68 +724,137 @@ export class Renderer {
     this.updateSceneInfoBuffer();
     this.frameCount++;
 
+    // Update temporal reprojection params
+    // When camera is static, use running average (1/(n+1)) for proper convergence
+    // When moving, use fixed blend factor for temporal stability
+    const isStatic = this.staticFrameCount > 0;
+    const blendFactor = isStatic
+      ? 1.0 / (this.staticFrameCount + 1)  // Running average for convergence
+      : 0.2;  // 20% new sample when moving
+
+    const temporalParamsData = new ArrayBuffer(32);
+    const temporalParamsFloat = new Float32Array(temporalParamsData);
+    const temporalParamsUint = new Uint32Array(temporalParamsData);
+    temporalParamsFloat[0] = this.renderWidth;
+    temporalParamsFloat[1] = this.renderHeight;
+    temporalParamsFloat[2] = blendFactor;
+    temporalParamsFloat[3] = 0.5;  // depth_threshold
+    temporalParamsUint[4] = this.staticFrameCount;  // For disabling clamping when static
+    this.device.queue.writeBuffer(this.temporalParamsBuffer, 0, temporalParamsData);
+
+    // Update camera matrices for temporal reprojection
+    const currentViewProj = this.buildViewProjMatrix(this.camera);
+    const currentInvViewProj = this.invertMatrix(currentViewProj);
+    const prevViewProj = this.prevCamera
+      ? this.buildViewProjMatrix(this.prevCamera)
+      : currentViewProj;
+
+    const matricesData = new Float32Array(32);
+    matricesData.set(currentInvViewProj, 0);
+    matricesData.set(prevViewProj, 16);
+    this.device.queue.writeBuffer(this.cameraMatricesBuffer, 0, matricesData);
+
     const commandEncoder = this.device.createCommandEncoder();
 
-    // Path tracing pass
+    const workgroupSize = 8;
+    const dispatchX = Math.ceil(this.renderWidth / workgroupSize);
+    const dispatchY = Math.ceil(this.renderHeight / workgroupSize);
+
+    // 1. Path tracing pass
     const computePass = commandEncoder.beginComputePass();
     computePass.setPipeline(this.computePipeline);
     computePass.setBindGroup(0, this.computeBindGroup);
-
-    const workgroupSize = 8;
-    const dispatchX = Math.ceil(this.width / workgroupSize);
-    const dispatchY = Math.ceil(this.height / workgroupSize);
     computePass.dispatchWorkgroups(dispatchX, dispatchY);
     computePass.end();
 
-    // Copy output to accumulation for next frame
-    commandEncoder.copyTextureToTexture(
-      { texture: this.outputTexture },
-      { texture: this.accumulationTexture },
-      { width: this.width, height: this.height }
-    );
+    // 2. Temporal reprojection pass (optional)
+    if (this.enableTemporalReprojection) {
+      const temporalPass = commandEncoder.beginComputePass();
+      temporalPass.setPipeline(this.temporalPipeline);
+      temporalPass.setBindGroup(0, this.temporalBindGroup);
+      temporalPass.dispatchWorkgroups(dispatchX, dispatchY);
+      temporalPass.end();
 
-    // À-trous wavelet denoise passes
-    // Step sizes: 1, 2, 4, 8, 16
-    for (let i = 0; i < this.DENOISE_PASSES; i++) {
-      const stepSize = 1 << i; // 1, 2, 4, 8, 16
-
-      // Update denoise params
-      const paramsData = new ArrayBuffer(16);
-      const paramsUint = new Uint32Array(paramsData);
-      const paramsFloat = new Float32Array(paramsData);
-      paramsUint[0] = stepSize;
-      paramsFloat[1] = 4.0;   // sigma_color
-      paramsFloat[2] = 128.0; // sigma_normal (power for normal weight)
-      paramsFloat[3] = 1.0;   // sigma_depth
-      this.device.queue.writeBuffer(this.denoiseParamsBuffer, 0, paramsData);
-
-      const denoisePass = commandEncoder.beginComputePass();
-      denoisePass.setPipeline(this.denoisePipeline);
-
-      // Select appropriate bind group for ping-pong
-      let bindGroupIndex: number;
-      if (i === 0) {
-        bindGroupIndex = 0; // output -> pingPong
-      } else if (i % 2 === 1) {
-        bindGroupIndex = 1; // pingPong -> denoised
-      } else {
-        bindGroupIndex = 2; // denoised -> pingPong
-      }
-
-      denoisePass.setBindGroup(0, this.denoiseBindGroups[bindGroupIndex]);
-      denoisePass.dispatchWorkgroups(dispatchX, dispatchY);
-      denoisePass.end();
-    }
-
-    // If odd number of passes, final result is in pingPong, need to copy to denoised
-    if (this.DENOISE_PASSES % 2 === 1) {
+      // Copy current frame to history for next frame
       commandEncoder.copyTextureToTexture(
-        { texture: this.pingPongTexture },
-        { texture: this.denoisedTexture },
-        { width: this.width, height: this.height }
+        { texture: this.temporalOutputTexture },
+        { texture: this.historyColorTexture },
+        { width: this.renderWidth, height: this.renderHeight }
+      );
+      commandEncoder.copyTextureToTexture(
+        { texture: this.depthTexture },
+        { texture: this.historyDepthTexture },
+        { width: this.renderWidth, height: this.renderHeight }
       );
     }
 
+    // Determine input for denoise/display
+    const postTemporalTexture = this.enableTemporalReprojection
+      ? this.temporalOutputTexture
+      : this.outputTexture;
+
+    // 3. À-trous wavelet denoise passes (optional)
+    const skipDenoise = !this.enableSpatialDenoise || (this.enableTemporalReprojection && this.staticFrameCount > 30);
+    const numDenoisePasses = skipDenoise ? 0 : this.DENOISE_PASSES;
+
+    // If denoise is enabled but temporal is disabled, copy output to temporalOutput
+    // so the denoise bind groups work correctly
+    if (numDenoisePasses > 0 && !this.enableTemporalReprojection) {
+      commandEncoder.copyTextureToTexture(
+        { texture: this.outputTexture },
+        { texture: this.temporalOutputTexture },
+        { width: this.renderWidth, height: this.renderHeight }
+      );
+    }
+
+    if (numDenoisePasses > 0) {
+      for (let i = 0; i < numDenoisePasses; i++) {
+        const stepSize = 1 << i;
+
+        const paramsData = new ArrayBuffer(16);
+        const paramsUint = new Uint32Array(paramsData);
+        const paramsFloat = new Float32Array(paramsData);
+        paramsUint[0] = stepSize;
+        paramsFloat[1] = 4.0;   // sigma_color
+        paramsFloat[2] = 128.0; // sigma_normal
+        paramsFloat[3] = 1.0;   // sigma_depth
+        this.device.queue.writeBuffer(this.denoiseParamsBuffer, 0, paramsData);
+
+        const denoisePass = commandEncoder.beginComputePass();
+        denoisePass.setPipeline(this.denoisePipeline);
+
+        let bindGroupIndex: number;
+        if (i === 0) {
+          bindGroupIndex = 0; // temporalOutput -> pingPong
+        } else if (i % 2 === 1) {
+          bindGroupIndex = 1; // pingPong -> denoised
+        } else {
+          bindGroupIndex = 2; // denoised -> pingPong
+        }
+
+        denoisePass.setBindGroup(0, this.denoiseBindGroups[bindGroupIndex]);
+        denoisePass.dispatchWorkgroups(dispatchX, dispatchY);
+        denoisePass.end();
+      }
+
+      // Copy result to denoised texture if odd number of passes
+      if (numDenoisePasses % 2 === 1) {
+        commandEncoder.copyTextureToTexture(
+          { texture: this.pingPongTexture },
+          { texture: this.denoisedTexture },
+          { width: this.renderWidth, height: this.renderHeight }
+        );
+      }
+    } else {
+      // No denoising - copy directly to denoised texture for display
+      commandEncoder.copyTextureToTexture(
+        { texture: postTemporalTexture },
+        { texture: this.denoisedTexture },
+        { width: this.renderWidth, height: this.renderHeight }
+      );
+    }
+
+    // 5. Render to screen
     const textureView = this.context.getCurrentTexture().createView();
     const renderPass = commandEncoder.beginRenderPass({
       colorAttachments: [
@@ -603,5 +872,13 @@ export class Renderer {
     renderPass.end();
 
     this.device.queue.submit([commandEncoder.finish()]);
+
+    // Store current camera as previous for next frame
+    this.prevCamera = {
+      position: { ...this.camera.position },
+      direction: { ...this.camera.direction },
+      up: { ...this.camera.up },
+      fov: this.camera.fov,
+    };
   }
 }

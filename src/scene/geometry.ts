@@ -139,7 +139,7 @@ export function createCornellBox(): Triangle[] {
   const red = { x: 0.65, y: 0.05, z: 0.05 };
   const green = { x: 0.12, y: 0.45, z: 0.15 };
   const noEmissive = { x: 0, y: 0, z: 0 };
-  const lightEmissive = { x: 15, y: 15, z: 15 };
+  const lightEmissive = { x: 40, y: 40, z: 40 };
 
   // Floor (white)
   triangles.push(...createQuad(

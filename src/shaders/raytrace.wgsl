@@ -54,9 +54,8 @@ struct HitInfo {
 @group(0) @binding(2) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(3) var<storage, read> bvh_nodes: array<BVHNode>;
 @group(0) @binding(4) var<uniform> scene_info: SceneInfo;
-@group(0) @binding(5) var accumulation: texture_2d<f32>;
-@group(0) @binding(6) var output_normal: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(7) var output_depth: texture_storage_2d<r32float, write>;
+@group(0) @binding(5) var output_normal: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(6) var output_depth: texture_storage_2d<r32float, write>;
 
 const MAX_STACK_SIZE = 32u;
 const LEAF_FLAG = 0x80000000u;
@@ -280,6 +279,8 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
   return radiance;
 }
 
+const SAMPLES_PER_PIXEL = 128u;
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3u) {
   let dims = textureDimensions(output);
@@ -291,44 +292,45 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   // Initialize RNG
   var rng_state = rand_seed(global_id.xy, scene_info.frame);
 
-  // Add sub-pixel jitter for anti-aliasing
-  let jitter_x = pcg(&rng_state) - 0.5;
-  let jitter_y = pcg(&rng_state) - 0.5;
-  let pixel = vec2f(f32(global_id.x) + 0.5 + jitter_x, f32(global_id.y) + 0.5 + jitter_y);
-
-  let ray_origin = camera.position;
-  let ray_dir = generate_ray(pixel);
-
-  // Get primary ray hit for G-buffer
-  let primary_hit = trace_bvh(ray_origin, ray_dir);
-
-  // Write G-buffer data (normal and depth from primary hit)
+  var color = vec3f(0.0);
   var primary_normal = vec3f(0.0);
   var primary_depth = 1e30;
-  if (primary_hit.hit) {
-    primary_normal = primary_hit.normal;
-    // Flip normal if we hit backface
-    if (dot(ray_dir, primary_normal) > 0.0) {
-      primary_normal = -primary_normal;
-    }
-    primary_depth = primary_hit.t;
-  }
-  textureStore(output_normal, global_id.xy, vec4f(primary_normal, 1.0));
-  textureStore(output_depth, global_id.xy, vec4f(primary_depth, 0.0, 0.0, 0.0));
 
-  // Path trace
-  var color = path_trace(ray_origin, ray_dir, &rng_state);
+  for (var s = 0u; s < SAMPLES_PER_PIXEL; s++) {
+    // Add sub-pixel jitter for anti-aliasing
+    let jitter_x = pcg(&rng_state) - 0.5;
+    let jitter_y = pcg(&rng_state) - 0.5;
+    let pixel = vec2f(f32(global_id.x) + 0.5 + jitter_x, f32(global_id.y) + 0.5 + jitter_y);
+
+    let ray_origin = camera.position;
+    let ray_dir = generate_ray(pixel);
+
+    // Get primary ray hit for G-buffer (only first sample)
+    if (s == 0u) {
+      let primary_hit = trace_bvh(ray_origin, ray_dir);
+      if (primary_hit.hit) {
+        primary_normal = primary_hit.normal;
+        if (dot(ray_dir, primary_normal) > 0.0) {
+          primary_normal = -primary_normal;
+        }
+        primary_depth = primary_hit.t;
+      }
+    }
+
+    // Path trace and accumulate
+    color += path_trace(ray_origin, ray_dir, &rng_state);
+  }
+
+  // Average samples
+  color /= f32(SAMPLES_PER_PIXEL);
 
   // Clamp to prevent fireflies
   color = clamp(color, vec3f(0.0), vec3f(10.0));
 
-  // Temporal accumulation - blend with previous frames
-  let frame = f32(scene_info.frame);
-  if (frame > 0.0) {
-    let prev_color = textureLoad(accumulation, vec2i(global_id.xy), 0).rgb;
-    // Running average: new_avg = old_avg + (new_sample - old_avg) / (n + 1)
-    color = prev_color + (color - prev_color) / (frame + 1.0);
-  }
+  // Write G-buffer
+  textureStore(output_normal, global_id.xy, vec4f(primary_normal, 1.0));
+  textureStore(output_depth, global_id.xy, vec4f(primary_depth, 0.0, 0.0, 0.0));
 
+  // Output averaged sample
   textureStore(output, global_id.xy, vec4f(color, 1.0));
 }
