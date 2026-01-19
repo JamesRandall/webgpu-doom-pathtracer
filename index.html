@@ -81,12 +81,20 @@
       padding: 4px 8px;
       border-radius: 4px;
     }
-    #fps {
+    #stats {
       font-family: monospace;
-      font-size: 1rem;
+      font-size: 0.8rem;
       margin-bottom: 0.75rem;
       padding-bottom: 0.5rem;
       border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+      line-height: 1.4;
+    }
+    #stats .stat-row {
+      display: flex;
+      justify-content: space-between;
+    }
+    #stats .stat-value {
+      color: #8f8;
     }
   </style>
 </head>
@@ -96,7 +104,12 @@
     <canvas id="canvas" width="1280" height="800"></canvas>
     <div id="hint">Click to capture mouse | WASD to move | Q/E to rotate | Space/Shift for up/down | ESC to release</div>
     <div id="controls">
-      <div id="fps">FPS: --</div>
+      <div id="stats">
+        <div class="stat-row"><span>FPS:</span> <span class="stat-value" id="fps-value">--</span></div>
+        <div class="stat-row"><span>Rays/sec:</span> <span class="stat-value" id="rays-value">--</span></div>
+        <div class="stat-row"><span>Samples:</span> <span class="stat-value" id="samples-display">--</span></div>
+        <div class="stat-row"><span>Resolution:</span> <span class="stat-value" id="res-display">--</span></div>
+      </div>
       <label>
         <span>Samples/pixel</span>
         <input type="range" id="samples" min="0" max="10" value="4">

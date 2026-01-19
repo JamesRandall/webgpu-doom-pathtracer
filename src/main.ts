@@ -152,10 +152,21 @@ async function main() {
   });
 
   let lastTime = performance.now();
-  const fpsElement = document.getElementById('fps') as HTMLDivElement;
+  const fpsValueElement = document.getElementById('fps-value') as HTMLSpanElement;
+  const raysValueElement = document.getElementById('rays-value') as HTMLSpanElement;
+  const samplesDisplayElement = document.getElementById('samples-display') as HTMLSpanElement;
+  const resDisplayElement = document.getElementById('res-display') as HTMLSpanElement;
   let frameCount = 0;
   let fpsAccumulator = 0;
   let lastFpsUpdate = performance.now();
+
+  // Helper to format large numbers
+  function formatNumber(n: number): string {
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return n.toFixed(0);
+  }
 
   function frame(currentTime: number) {
     const deltaTime = (currentTime - lastTime) / 1000;
@@ -165,12 +176,26 @@ async function main() {
     renderer.updateCamera(cameraController.getCamera());
     renderer.render();
 
-    // FPS tracking
+    // Performance metrics tracking
     frameCount++;
     fpsAccumulator += deltaTime;
     if (currentTime - lastFpsUpdate >= 500) {
       const fps = frameCount / fpsAccumulator;
-      fpsElement.textContent = `FPS: ${fps.toFixed(1)}`;
+
+      // Calculate rays per second
+      // Render resolution
+      const renderWidth = Math.floor(canvas.width * Renderer.RESOLUTION_SCALE);
+      const renderHeight = Math.floor(canvas.height * Renderer.RESOLUTION_SCALE);
+      const pixels = renderWidth * renderHeight;
+      const samples = renderer.samplesPerPixel;
+      const raysPerSecond = pixels * samples * fps;
+
+      // Update display
+      fpsValueElement.textContent = fps.toFixed(1);
+      raysValueElement.textContent = formatNumber(raysPerSecond);
+      samplesDisplayElement.textContent = `${samples}/px`;
+      resDisplayElement.textContent = `${renderWidth}x${renderHeight}`;
+
       frameCount = 0;
       fpsAccumulator = 0;
       lastFpsUpdate = currentTime;
