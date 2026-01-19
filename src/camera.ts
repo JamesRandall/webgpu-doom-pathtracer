@@ -1,4 +1,5 @@
 import { Camera } from './renderer';
+import { CollisionDetector } from './doom/collision';
 
 export class CameraController {
   private position: { x: number; y: number; z: number };
@@ -11,6 +12,7 @@ export class CameraController {
   private moveSpeed: number;
   private lookSensitivity: number;
   private isLocked: boolean = false;
+  private collision: CollisionDetector | null = null;
 
   constructor(
     position: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 },
@@ -26,6 +28,10 @@ export class CameraController {
     this.fov = fov;
     this.moveSpeed = moveSpeed;
     this.lookSensitivity = lookSensitivity;
+  }
+
+  setCollision(collision: CollisionDetector): void {
+    this.collision = collision;
   }
 
   attach(canvas: HTMLCanvasElement): void {
@@ -75,31 +81,41 @@ export class CameraController {
 
     const speed = this.moveSpeed * deltaTime;
 
+    // Calculate desired new position
+    let newPos = { ...this.position };
+
     // WASD movement
     if (this.keys.has('KeyW')) {
-      this.position.x += forward.x * speed;
-      this.position.z += forward.z * speed;
+      newPos.x += forward.x * speed;
+      newPos.z += forward.z * speed;
     }
     if (this.keys.has('KeyS')) {
-      this.position.x -= forward.x * speed;
-      this.position.z -= forward.z * speed;
+      newPos.x -= forward.x * speed;
+      newPos.z -= forward.z * speed;
     }
     if (this.keys.has('KeyA')) {
-      this.position.x -= right.x * speed;
-      this.position.z -= right.z * speed;
+      newPos.x -= right.x * speed;
+      newPos.z -= right.z * speed;
     }
     if (this.keys.has('KeyD')) {
-      this.position.x += right.x * speed;
-      this.position.z += right.z * speed;
+      newPos.x += right.x * speed;
+      newPos.z += right.z * speed;
     }
 
     // Vertical movement (Space/Shift)
     if (this.keys.has('Space')) {
-      this.position.y += speed;
+      newPos.y += speed;
     }
     if (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) {
-      this.position.y -= speed;
+      newPos.y -= speed;
     }
+
+    // Apply collision detection if available
+    if (this.collision) {
+      newPos = this.collision.checkMove(this.position, newPos);
+    }
+
+    this.position = newPos;
 
     // Rotation (Q/E)
     const rotateSpeed = 2.0 * deltaTime;  // radians per second

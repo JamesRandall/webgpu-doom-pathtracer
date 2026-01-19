@@ -3,6 +3,7 @@ import { createCornellBox } from './scene/geometry';
 import { CameraController } from './camera';
 import { WadParser } from './doom/wad-parser';
 import { convertLevelToScene } from './doom/level-converter';
+import { CollisionDetector } from './doom/collision';
 
 async function main() {
   const errorDiv = document.getElementById('error') as HTMLDivElement;
@@ -64,14 +65,24 @@ async function main() {
     // Find floor height at player start
     const startY = 0.8;  // Approximate eye height
 
+    // Create collision detector
+    const collision = new CollisionDetector(levelData);
+
+    // Get floor height at player start for accurate Y position
+    const floorY = collision.getFloorHeight(startX, startZ);
+    const eyeHeight = 0.875;  // ~56 Doom units
+
     cameraController = new CameraController(
-      { x: startX, y: startY, z: startZ },
+      { x: startX, y: floorY + eyeHeight, z: startZ },
       startAngle - Math.PI / 2,  // Convert Doom angle to our yaw
       0,
       90,   // fov
       5,    // move speed (faster for larger level)
       0.002
     );
+
+    // Enable collision detection
+    cameraController.setCollision(collision);
 
     console.log(`Loaded E1M1: ${scene.triangles.length} triangles, ${scene.materials.length} materials`);
   } catch (e) {

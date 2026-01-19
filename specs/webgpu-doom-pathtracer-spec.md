@@ -398,6 +398,220 @@ interface Material {
 
 ---
 
+### Phase 11: Doom Textures
+
+**Goal:** Apply original Doom textures to level geometry.
+
+**Deliverables:**
+- WAD texture extraction (patches, textures, flats, palette)
+- Texture atlas or texture array on GPU
+- UV generation during geometry conversion
+- Texture sampling in path trace shader
+- Transparent texture handling
+
+**WAD Lump Parsing:**
+
+Extract these lumps from the WAD:
+
+| Lump | Purpose |
+|------|---------|
+| `PLAYPAL` | 256-colour palette (768 bytes, RGB triplets) |
+| `PNAMES` | List of patch names |
+| `TEXTURE1`, `TEXTURE2` | Texture composition definitions |
+| `P_START` to `P_END` | Patch graphics |
+| `F_START` to `F_END` | Flat graphics (floors/ceilings) |
+
+**Patch format:**
+```typescript
+interface PatchHeader {
+  width: number;       // u16
+  height: number;      // u16
+  leftOffset: number;  // i16
+  topOffset: number;   // i16
+}
+// Followed by column offsets and column data (run-length encoded)
+```
+
+**Texture composition:**
+
+TEXTURE1/2 defines how patches combine:
+```typescript
+interface TextureDef {
+  name: string;        // 8 chars
+  width: number;
+  height: number;
+  patches: Array<{
+    originX: number;
+    originY: number;
+    patchIndex: number;  // Index into PNAMES
+  }>;
+}
+```
+
+Composite patches onto a canvas to build final texture.
+
+**Flat format:**
+
+Simpler — raw 64x64 bytes, palette indices. No header.
+```typescript
+function parseFlat(data: Uint8Array, palette: Uint8Array): ImageData {
+  // data is 4096 bytes, each byte is palette index
+  // palette is 768 bytes, RGB triplets
+}
+```
+
+**Texture atlas construction:**
+```typescript
+interface AtlasEntry {
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface TextureAtlas {
+  image: ImageData;      // Or Uint8Array RGBA
+  entries: Map<string, AtlasEntry>;
+  size: number;          // Atlas is square, power of two
+}
+```
+
+Pack textures using simple shelf algorithm or more sophisticated bin packing. 2048x2048 or 4096x4096 should fit everything.
+
+**UV generation for walls:**
+
+From sidedef data during geometry conversion:
+```typescript
+function computeWallUVs(
+  linedef: Linedef,
+  sidedef: Sidedef,
+  texture: AtlasEntry,
+  wallTop: number,
+  wallBottom: number
+): { uv0: vec2, uv1: vec2, uv2: vec2, uv3: vec2 } {
+  
+  const lineLength = length(linedef.end - linedef.start);
+  
+  // Doom units to texture pixels (textures tile at native resolution)
+  const u0 = sidedef.xOffset / texture.width;
+  const u1 = (sidedef.xOffset + lineLength) / texture.width;
+  
+  const wallHeight = wallTop - wallBottom;
+  const v0 = sidedef.yOffset / texture.height;
+  const v1 = (sidedef.yOffset + wallHeight) / texture.height;
+  
+  // Convert to atlas coordinates
+  return atlasUVs(texture, u0, v0, u1, v1);
+}
+```
+
+**UV generation for flats:**
+
+World-aligned, 64-unit repeat:
+```typescript
+function computeFlatUV(worldPos: vec3, flat: AtlasEntry): vec2 {
+  const u = worldPos.x / 64.0;
+  const v = worldPos.y / 64.0;
+  return atlasUV(flat, fract(u), fract(v));
+}
+```
+
+Per-vertex during triangulation of sector polygons.
+
+**Shader changes:**
+
+Extend triangle data:
+```wgsl
+struct Triangle {
+  v0: vec3f, v1: vec3f, v2: vec3f,
+  n0: vec3f, n1: vec3f, n2: vec3f,
+  uv0: vec2f, uv1: vec2f, uv2: vec2f,
+  material_index: u32,
+  texture_index: u32,  // Index into atlas entries buffer, or -1 for none
+}
+```
+
+Sample at hit point:
+```wgsl
+fn get_albedo(hit: HitInfo, tri: Triangle) -> vec3f {
+  if (tri.texture_index == 0xFFFFFFFFu) {
+    return materials[tri.material_index].albedo;
+  }
+  
+  // Barycentric interpolation
+  let w = 1.0 - hit.u - hit.v;
+  let uv = w * tri.uv0 + hit.u * tri.uv1 + hit.v * tri.uv2;
+  
+  // Sample atlas
+  let tex_colour = textureSampleLevel(atlas, atlas_sampler, uv, 0.0);
+  return tex_colour.rgb;
+}
+```
+
+**Transparent textures:**
+
+Doom uses palette index 255 for transparency. During atlas construction, set alpha to 0 for these pixels.
+
+In shader, either:
+- Alpha test and continue ray through surface
+- Or mark transparent textures specially and handle in intersection
+```wgsl
+let tex_colour = textureSampleLevel(atlas, atlas_sampler, uv, 0.0);
+if (tex_colour.a < 0.5) {
+  // Transparent — ignore this hit, continue ray
+  return trace_ray(ray_advance(ray, hit.t + 0.001));
+}
+```
+
+Note: this requires rethinking your traversal slightly, or handling transparency as a special case after initial hit.
+
+**Sky handling:**
+
+Detect `F_SKY1` flat on ceilings. Options:
+
+1. **Emissive sky colour:** Mark sky surfaces with high emissive value
+2. **Environment map:** Sample a sky texture based on ray direction when hitting sky
+3. **Simple gradient:** Return a procedural sky colour based on ray direction
+```wgsl
+if (hit.is_sky) {
+  let sky_colour = mix(
+    vec3f(0.5, 0.7, 1.0),  // Horizon
+    vec3f(0.2, 0.4, 0.9),  // Zenith
+    ray.direction.z
+  );
+  return sky_colour * sky_intensity;
+}
+```
+
+**Sampler configuration:**
+```typescript
+const atlasSampler = device.createSampler({
+  magFilter: 'nearest',    // Keep pixelated look
+  minFilter: 'nearest',
+  addressModeU: 'repeat',  // Textures tile
+  addressModeV: 'repeat',
+});
+```
+
+Use `nearest` filtering to preserve Doom's chunky aesthetic. Linear filtering will blur the pixels.
+
+**Acceptance criteria:**
+- E1M1 renders with correct wall and flat textures
+- Textures align correctly (no obvious offset errors)
+- Textures tile correctly on large surfaces
+- Transparent sections of textures (gratings, etc.) handled
+- Sky surfaces emit light or show sky colour
+- Palette colours look authentic to original Doom
+
+**Notes:**
+- Start with flats only — simpler format, easier to debug
+- Then add wall textures — more complex composition
+- Leave animated textures for later (or out of scope)
+- The palette has a distinctive look; resist the urge to "improve" the colours
+
+---
+
 ## Technical Notes
 
 ### WebGPU Initialisation
