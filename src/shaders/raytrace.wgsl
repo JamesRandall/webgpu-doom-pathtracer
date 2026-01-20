@@ -26,6 +26,19 @@ struct Triangle {
   _pad2: f32,
   normal: vec3f,
   material_index: u32,
+  uv0: vec2f,
+  uv1: vec2f,
+  uv2: vec2f,
+  texture_index: i32,
+  _pad3: f32,
+}
+
+// Atlas entry for texture lookup
+struct AtlasEntry {
+  x: f32,
+  y: f32,
+  width: f32,
+  height: f32,
 }
 
 struct Material {
@@ -48,8 +61,8 @@ struct SceneInfo {
   frame: u32,
   max_bounces: u32,
   samples_per_pixel: u32,
-  _pad0: u32,
-  _pad1: u32,
+  atlas_width: u32,
+  atlas_height: u32,
   _pad2: u32,
 }
 
@@ -58,6 +71,8 @@ struct HitInfo {
   normal: vec3f,
   material_index: u32,
   hit: bool,
+  uv: vec2f,
+  texture_index: i32,
 }
 
 @group(0) @binding(0) var output: texture_storage_2d<rgba16float, write>;
@@ -68,6 +83,9 @@ struct HitInfo {
 @group(0) @binding(5) var<uniform> scene_info: SceneInfo;
 @group(0) @binding(6) var output_normal: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(7) var output_depth: texture_storage_2d<r32float, write>;
+@group(0) @binding(8) var texture_atlas: texture_2d<f32>;
+@group(0) @binding(9) var atlas_sampler: sampler;
+@group(0) @binding(10) var<storage, read> atlas_entries: array<AtlasEntry>;
 
 const MAX_STACK_SIZE = 32u;
 const LEAF_FLAG = 0x80000000u;
@@ -168,6 +186,31 @@ fn reflect_dir(incident: vec3f, normal: vec3f) -> vec3f {
   return incident - 2.0 * dot(incident, normal) * normal;
 }
 
+// Sample texture from atlas
+fn sample_texture(texture_index: i32, uv: vec2f, atlas_size: vec2f) -> vec4f {
+  if (texture_index < 0) {
+    return vec4f(1.0, 1.0, 1.0, 1.0);  // No texture, return white
+  }
+
+  let entry = atlas_entries[texture_index];
+
+  // Calculate atlas UV with tiling
+  let local_u = fract(uv.x);
+  let local_v = fract(uv.y);
+
+  let atlas_u = (entry.x + local_u * entry.width) / atlas_size.x;
+  let atlas_v = (entry.y + local_v * entry.height) / atlas_size.y;
+
+  return textureSampleLevel(texture_atlas, atlas_sampler, vec2f(atlas_u, atlas_v), 0.0);
+}
+
+// Triangle hit result with barycentric coordinates
+struct TriangleHitResult {
+  t: f32,
+  u: f32,
+  v: f32,
+}
+
 // Ray-Triangle intersection using Moller-Trumbore algorithm
 fn intersect_triangle(ray_origin: vec3f, ray_dir: vec3f, v0: vec3f, v1: vec3f, v2: vec3f) -> f32 {
   let edge1 = v1 - v0;
@@ -203,6 +246,48 @@ fn intersect_triangle(ray_origin: vec3f, ray_dir: vec3f, v0: vec3f, v1: vec3f, v
   return -1.0;
 }
 
+// Ray-Triangle intersection with barycentric coordinates for UV interpolation
+fn intersect_triangle_uv(ray_origin: vec3f, ray_dir: vec3f, v0: vec3f, v1: vec3f, v2: vec3f) -> TriangleHitResult {
+  var result: TriangleHitResult;
+  result.t = -1.0;
+  result.u = 0.0;
+  result.v = 0.0;
+
+  let edge1 = v1 - v0;
+  let edge2 = v2 - v0;
+  let h = cross(ray_dir, edge2);
+  let a = dot(edge1, h);
+
+  if (abs(a) < 0.00001) {
+    return result;
+  }
+
+  let f = 1.0 / a;
+  let s = ray_origin - v0;
+  let u = f * dot(s, h);
+
+  if (u < 0.0 || u > 1.0) {
+    return result;
+  }
+
+  let q = cross(s, edge1);
+  let v = f * dot(ray_dir, q);
+
+  if (v < 0.0 || u + v > 1.0) {
+    return result;
+  }
+
+  let t = f * dot(edge2, q);
+
+  if (t > 0.0001) {
+    result.t = t;
+    result.u = u;
+    result.v = v;
+  }
+
+  return result;
+}
+
 // Ray-AABB intersection
 fn intersect_aabb(ray_origin: vec3f, ray_dir_inv: vec3f, box_min: vec3f, box_max: vec3f, max_t: f32) -> bool {
   let t1 = (box_min - ray_origin) * ray_dir_inv;
@@ -228,6 +313,8 @@ fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   closest_hit.t = 1e30;
   closest_hit.hit = false;
   closest_hit.material_index = 0u;
+  closest_hit.uv = vec2f(0.0, 0.0);
+  closest_hit.texture_index = -1;
 
   if (scene_info.node_count == 0u) {
     return closest_hit;
@@ -257,13 +344,18 @@ fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
       for (var i = 0u; i < tri_count; i++) {
         let tri_idx = first_tri + i;
         let tri = triangles[tri_idx];
-        let t = intersect_triangle(ray_origin, ray_dir, tri.v0, tri.v1, tri.v2);
+        let hit_result = intersect_triangle_uv(ray_origin, ray_dir, tri.v0, tri.v1, tri.v2);
 
-        if (t > 0.0 && t < closest_hit.t) {
-          closest_hit.t = t;
+        if (hit_result.t > 0.0 && hit_result.t < closest_hit.t) {
+          closest_hit.t = hit_result.t;
           closest_hit.normal = tri.normal;
           closest_hit.material_index = tri.material_index;
           closest_hit.hit = true;
+          closest_hit.texture_index = tri.texture_index;
+
+          // Interpolate UV using barycentric coordinates
+          let w = 1.0 - hit_result.u - hit_result.v;
+          closest_hit.uv = w * tri.uv0 + hit_result.u * tri.uv1 + hit_result.v * tri.uv2;
         }
       }
     } else {
@@ -317,7 +409,23 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
     // Get material properties
     let mat = materials[hit.material_index];
 
-    // Add emissive contribution
+    // Sample texture if available
+    let atlas_size = vec2f(f32(scene_info.atlas_width), f32(scene_info.atlas_height));
+    let tex_color = sample_texture(hit.texture_index, hit.uv, atlas_size);
+
+    // Combine texture color with material
+    // For textured surfaces: use texture color directly, scaled by material brightness
+    // For untextured: use material albedo
+    var surface_color: vec3f;
+    if (hit.texture_index >= 0) {
+      // Use average of material albedo as brightness multiplier
+      let brightness = (mat.albedo.x + mat.albedo.y + mat.albedo.z) / 3.0;
+      surface_color = tex_color.rgb * brightness;
+    } else {
+      surface_color = mat.albedo;
+    }
+
+    // Add emissive contribution (textures don't affect emissive)
     radiance += throughput * mat.emissive;
 
     // Calculate hit position
@@ -340,7 +448,7 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       if (roughness < 0.01) {
         // Perfect mirror reflection
         ray_dir = reflect_dir(ray_dir, normal);
-        throughput *= mat.albedo;
+        throughput *= surface_color;
       } else {
         // GGX importance sampling
         let r1 = pcg(rng_state);
@@ -363,8 +471,8 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
         let n_dot_h = max(dot(normal, h), 0.001);
         let v_dot_h = max(dot(-ray_dir, h), 0.001);
 
-        // Fresnel (using albedo as F0 for metals)
-        let f = fresnel_schlick(v_dot_h, mat.albedo);
+        // Fresnel (using surface color as F0 for metals)
+        let f = fresnel_schlick(v_dot_h, surface_color);
 
         // Geometry term
         let g = ggx_g(n_dot_v, n_dot_l, roughness);
@@ -380,8 +488,8 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       ray_origin = hit_pos + normal * 0.001;
     } else {
       // Diffuse material (MATERIAL_DIFFUSE)
-      // Update throughput with surface albedo
-      throughput *= mat.albedo;
+      // Update throughput with textured surface color
+      throughput *= surface_color;
 
       ray_origin = hit_pos + normal * 0.001;
 

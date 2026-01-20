@@ -16,12 +16,23 @@ export interface Material {
   materialType: number;  // 0 = diffuse, 1 = specular, 2 = emissive
 }
 
+export interface Vec2 {
+  u: number;
+  v: number;
+}
+
 export interface Triangle {
   v0: Vec3;
   v1: Vec3;
   v2: Vec3;
   normal: Vec3;
   materialIndex: number;
+  // UV coordinates for texture mapping
+  uv0: Vec2;
+  uv1: Vec2;
+  uv2: Vec2;
+  // Texture index in atlas (-1 if no texture)
+  textureIndex: number;
 }
 
 function subtract(a: Vec3, b: Vec3): Vec3 {
@@ -55,6 +66,10 @@ function createTriangle(v0: Vec3, v1: Vec3, v2: Vec3, materialIndex: number): Tr
     v2,
     normal: computeNormal(v0, v1, v2),
     materialIndex,
+    uv0: { u: 0, v: 0 },
+    uv1: { u: 1, v: 0 },
+    uv2: { u: 1, v: 1 },
+    textureIndex: -1,  // No texture by default
   };
 }
 
@@ -328,17 +343,26 @@ function createBox(center: Vec3, width: number, depth: number, height: number, m
 }
 
 // Pack triangles into a Float32Array for GPU upload
-// Layout per triangle: v0(3)+pad + v1(3)+pad + v2(3)+pad + normal(3)+materialIndex = 16 floats
+// Layout per triangle:
+//   v0(3) + pad(1) = 4 floats
+//   v1(3) + pad(1) = 4 floats
+//   v2(3) + pad(1) = 4 floats
+//   normal(3) + materialIndex(1) = 4 floats
+//   uv0(2) + uv1(2) = 4 floats
+//   uv2(2) + textureIndex(1) + pad(1) = 4 floats
+// Total: 24 floats
 export function packTriangles(triangles: Triangle[]): Float32Array {
-  const floatsPerTriangle = 16;
+  const floatsPerTriangle = 24;
   const buffer = new ArrayBuffer(triangles.length * floatsPerTriangle * 4);
   const data = new Float32Array(buffer);
   const dataUint = new Uint32Array(buffer);
+  const dataInt = new Int32Array(buffer);
 
   for (let i = 0; i < triangles.length; i++) {
     const t = triangles[i];
     const offset = i * floatsPerTriangle;
 
+    // Vertex positions
     data[offset + 0] = t.v0.x;
     data[offset + 1] = t.v0.y;
     data[offset + 2] = t.v0.z;
@@ -354,10 +378,22 @@ export function packTriangles(triangles: Triangle[]): Float32Array {
     data[offset + 10] = t.v2.z;
     data[offset + 11] = 0;
 
+    // Normal and material
     data[offset + 12] = t.normal.x;
     data[offset + 13] = t.normal.y;
     data[offset + 14] = t.normal.z;
     dataUint[offset + 15] = t.materialIndex;
+
+    // UV coordinates
+    data[offset + 16] = t.uv0.u;
+    data[offset + 17] = t.uv0.v;
+    data[offset + 18] = t.uv1.u;
+    data[offset + 19] = t.uv1.v;
+
+    data[offset + 20] = t.uv2.u;
+    data[offset + 21] = t.uv2.v;
+    dataInt[offset + 22] = t.textureIndex;
+    data[offset + 23] = 0; // padding
   }
 
   return data;

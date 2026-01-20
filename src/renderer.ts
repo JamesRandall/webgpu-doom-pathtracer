@@ -3,6 +3,7 @@ import denoiseShaderCode from './shaders/denoise.wgsl?raw';
 import temporalShaderCode from './shaders/temporal.wgsl?raw';
 import { Triangle, Material, packTriangles, packMaterials } from './scene/geometry';
 import { BVHBuilder, flattenBVH, packBVHNodes } from './bvh/builder';
+import { TextureAtlas, AtlasEntry } from './doom/textures';
 
 export interface Camera {
   position: { x: number; y: number; z: number };
@@ -22,6 +23,7 @@ export class Renderer {
   private camera: Camera;
   private triangles: Triangle[];
   private materials: Material[];
+  private textureAtlas: TextureAtlas | null;
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
   public static RESOLUTION_SCALE = 0.25;
@@ -54,6 +56,11 @@ export class Renderer {
   private sampler!: GPUSampler;
   private denoiseParamsBuffer!: GPUBuffer;
   private pingPongTexture!: GPUTexture;
+  private atlasTexture!: GPUTexture;
+  private atlasEntriesBuffer!: GPUBuffer;
+  private atlasSampler!: GPUSampler;
+  private atlasWidth: number = 1;
+  private atlasHeight: number = 1;
 
   // Previous frame camera for temporal reprojection
   private prevCamera: Camera | null = null;
@@ -75,7 +82,8 @@ export class Renderer {
     height: number,
     camera: Camera,
     triangles: Triangle[],
-    materials: Material[]
+    materials: Material[],
+    textureAtlas: TextureAtlas | null = null
   ) {
     this.device = device;
     this.context = context;
@@ -87,6 +95,7 @@ export class Renderer {
     this.camera = camera;
     this.triangles = triangles;
     this.materials = materials;
+    this.textureAtlas = textureAtlas;
     console.log(`Render resolution: ${this.renderWidth}x${this.renderHeight} (${Renderer.RESOLUTION_SCALE}x scale)`);
   }
 
@@ -211,11 +220,78 @@ export class Renderer {
     });
     this.device.queue.writeBuffer(this.bvhBuffer, 0, bvhData);
 
-    // Create scene info buffer (triangle count, node count, frame, bounces, samples_per_pixel, padding)
+    // Create scene info buffer (triangle count, node count, frame, bounces, samples_per_pixel, atlas_width, atlas_height, padding)
     this.sceneInfoBuffer = this.device.createBuffer({
       size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+
+    // Create texture atlas resources
+    if (this.textureAtlas && this.textureAtlas.width > 0) {
+      this.atlasWidth = this.textureAtlas.width;
+      this.atlasHeight = this.textureAtlas.height;
+
+      // Create atlas texture
+      this.atlasTexture = this.device.createTexture({
+        size: { width: this.atlasWidth, height: this.atlasHeight },
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+
+      // Upload atlas image data
+      this.device.queue.writeTexture(
+        { texture: this.atlasTexture },
+        this.textureAtlas.image.buffer,
+        { bytesPerRow: this.atlasWidth * 4 },
+        { width: this.atlasWidth, height: this.atlasHeight }
+      );
+
+      // Create atlas entries buffer
+      const entriesArray = Array.from(this.textureAtlas.entries.values());
+      const entriesData = new Float32Array(entriesArray.length * 4);
+      for (let i = 0; i < entriesArray.length; i++) {
+        const entry = entriesArray[i];
+        entriesData[i * 4 + 0] = entry.x;
+        entriesData[i * 4 + 1] = entry.y;
+        entriesData[i * 4 + 2] = entry.width;
+        entriesData[i * 4 + 3] = entry.height;
+      }
+
+      this.atlasEntriesBuffer = this.device.createBuffer({
+        size: Math.max(entriesData.byteLength, 16),
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(this.atlasEntriesBuffer, 0, entriesData);
+
+      console.log(`Atlas: ${this.atlasWidth}x${this.atlasHeight}, ${entriesArray.length} entries`);
+    } else {
+      // Create dummy 1x1 texture and empty buffer for when no atlas
+      this.atlasTexture = this.device.createTexture({
+        size: { width: 1, height: 1 },
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+      this.device.queue.writeTexture(
+        { texture: this.atlasTexture },
+        new Uint8Array([255, 255, 255, 255]),
+        { bytesPerRow: 4 },
+        { width: 1, height: 1 }
+      );
+
+      this.atlasEntriesBuffer = this.device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+    }
+
+    // Create atlas sampler with nearest filtering for pixel art look
+    this.atlasSampler = this.device.createSampler({
+      magFilter: 'nearest',
+      minFilter: 'nearest',
+      addressModeU: 'repeat',
+      addressModeV: 'repeat',
+    });
+
     this.updateSceneInfoBuffer();
 
     // Create compute shader module
@@ -278,6 +354,21 @@ export class Renderer {
             viewDimension: '2d',
           },
         },
+        {
+          binding: 8,
+          visibility: GPUShaderStage.COMPUTE,
+          texture: { sampleType: 'float', viewDimension: '2d' },
+        },
+        {
+          binding: 9,
+          visibility: GPUShaderStage.COMPUTE,
+          sampler: { type: 'filtering' },
+        },
+        {
+          binding: 10,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage' },
+        },
       ],
     });
 
@@ -326,6 +417,18 @@ export class Renderer {
         {
           binding: 7,
           resource: this.depthTexture.createView(),
+        },
+        {
+          binding: 8,
+          resource: this.atlasTexture.createView(),
+        },
+        {
+          binding: 9,
+          resource: this.atlasSampler,
+        },
+        {
+          binding: 10,
+          resource: { buffer: this.atlasEntriesBuffer },
         },
       ],
     });
@@ -601,8 +704,8 @@ export class Renderer {
       this.frameCount,
       4, // max bounces
       this.samplesPerPixel,
-      0, // padding
-      0, // padding
+      this.atlasWidth,
+      this.atlasHeight,
       0, // padding
     ]);
     this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, sceneInfo);

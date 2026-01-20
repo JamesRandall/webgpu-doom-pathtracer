@@ -2,8 +2,9 @@ import { Renderer } from './renderer';
 import { createCornellBox } from './scene/geometry';
 import { CameraController } from './camera';
 import { WadParser } from './doom/wad-parser';
-import { convertLevelToScene } from './doom/level-converter';
+import { convertLevelToScene, setTextureAtlas } from './doom/level-converter';
 import { CollisionDetector } from './doom/collision';
+import { TextureExtractor, TextureAtlas } from './doom/textures';
 
 async function main() {
   const errorDiv = document.getElementById('error') as HTMLDivElement;
@@ -44,6 +45,7 @@ async function main() {
   // Try to load Doom WAD, fall back to Cornell box
   let scene;
   let cameraController: CameraController;
+  let textureAtlas: TextureAtlas | null = null;
 
   try {
     const response = await fetch('/wads/DOOM1.WAD');
@@ -52,6 +54,14 @@ async function main() {
     const wad = new WadParser(wadBuffer);
 
     console.log('Available levels:', wad.getLevelNames());
+
+    // Extract textures and build atlas
+    const textureExtractor = new TextureExtractor(wad);
+    textureExtractor.extractAll();
+    textureAtlas = textureExtractor.buildAtlas();
+
+    // Set the atlas for UV generation
+    setTextureAtlas(textureAtlas);
 
     const levelData = wad.parseLevel('E1M1');
     scene = convertLevelToScene(levelData);
@@ -104,7 +114,7 @@ async function main() {
 
   cameraController.attach(canvas);
 
-  let renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), scene.triangles, scene.materials);
+  let renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), scene.triangles, scene.materials, textureAtlas);
   await renderer.initialize();
 
   // UI Controls
@@ -133,7 +143,7 @@ async function main() {
   // Resolution scale (requires recreating renderer)
   resolutionSelect.addEventListener('change', async () => {
     Renderer.RESOLUTION_SCALE = parseFloat(resolutionSelect.value);
-    renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), scene.triangles, scene.materials);
+    renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), scene.triangles, scene.materials, textureAtlas);
     await renderer.initialize();
     // Restore settings
     renderer.samplesPerPixel = Math.pow(2, parseInt(samplesSlider.value));

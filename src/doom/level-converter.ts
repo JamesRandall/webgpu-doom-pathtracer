@@ -1,6 +1,7 @@
 // Convert Doom level data to triangle meshes
 import { LevelData, Vertex, Linedef, Sidedef, Sector } from './wad-parser';
-import { Triangle, Material, Vec3, SceneData, MATERIAL_DIFFUSE, MATERIAL_EMISSIVE } from '../scene/geometry';
+import { Triangle, Material, Vec3, Vec2, SceneData, MATERIAL_DIFFUSE, MATERIAL_EMISSIVE } from '../scene/geometry';
+import { TextureAtlas, AtlasEntry } from './textures';
 
 // Doom units to world units scale (Doom 1 unit ≈ 1 inch, we'll use ~1/64 for reasonable world scale)
 const SCALE = 1 / 64;
@@ -74,10 +75,54 @@ function getEmissiveColor(textureName: string): Vec3 {
 // Convert sector light level (0-255) to brightness multiplier
 function lightLevelToBrightness(lightLevel: number): number {
   // Doom light levels: 0 = dark, 255 = bright
-  // We'll map this to a reasonable range for path tracing
-  // Using a slight curve to make dark areas darker
+  // Use linear mapping with a floor to prevent total darkness
+  // Boost overall brightness for path tracing (needs more light than rasterization)
   const normalized = lightLevel / 255;
-  return 0.1 + 0.9 * Math.pow(normalized, 1.5);
+  return 0.3 + 0.7 * normalized;
+}
+
+// Atlas entry lookup helper
+let textureAtlas: TextureAtlas | null = null;
+let atlasEntryList: AtlasEntry[] = [];
+
+// Set the texture atlas for UV generation
+export function setTextureAtlas(atlas: TextureAtlas | null): void {
+  textureAtlas = atlas;
+  if (atlas) {
+    atlasEntryList = Array.from(atlas.entries.values());
+  } else {
+    atlasEntryList = [];
+  }
+}
+
+// Get texture index from name
+function getTextureIndex(textureName: string): number {
+  if (!textureAtlas) return -1;
+  const upperName = textureName.toUpperCase().replace(/\0/g, '').replace(/-/g, '');
+  if (!upperName || upperName === '-') return -1;
+
+  const entry = textureAtlas.entries.get(upperName);
+  if (!entry) return -1;
+
+  return atlasEntryList.indexOf(entry);
+}
+
+// Get atlas UV for a texture
+function getAtlasUV(textureName: string, localU: number, localV: number): Vec2 {
+  if (!textureAtlas) return { u: localU, v: localV };
+
+  const upperName = textureName.toUpperCase().replace(/\0/g, '').replace(/-/g, '');
+  if (!upperName || upperName === '-') return { u: localU, v: localV };
+
+  const entry = textureAtlas.entries.get(upperName);
+  if (!entry) return { u: localU, v: localV };
+
+  // Convert local UV (0-1 within texture) to atlas UV
+  // Note: we allow tiling so localU/V can be > 1
+  const atlasU = (entry.x + (localU % 1) * entry.width) / textureAtlas.width;
+  const atlasV = (entry.y + (localV % 1) * entry.height) / textureAtlas.height;
+
+  return { u: atlasU, v: atlasV };
 }
 
 export function convertLevelToScene(level: LevelData): SceneData {
@@ -119,28 +164,13 @@ export function convertLevelToScene(level: LevelData): SceneData {
         materialType: MATERIAL_EMISSIVE,
       });
     } else {
-      // Base colors for different surface types
-      let baseColor: Vec3;
-      switch (type) {
-        case 'wall':
-          baseColor = { x: 0.6, y: 0.55, z: 0.5 };
-          break;
-        case 'floor':
-          baseColor = { x: 0.45, y: 0.42, z: 0.4 };
-          break;
-        case 'ceiling':
-          baseColor = { x: 0.5, y: 0.48, z: 0.45 };
-          break;
-        default:
-          baseColor = { x: 0.5, y: 0.5, z: 0.5 };
-      }
-
       // Apply brightness from sector light level
+      // Shader will use this as brightness multiplier for textured surfaces
       materials.push({
         albedo: {
-          x: baseColor.x * brightness,
-          y: baseColor.y * brightness,
-          z: baseColor.z * brightness,
+          x: brightness,
+          y: brightness,
+          z: brightness,
         },
         emissive: { x: 0, y: 0, z: 0 },
         roughness: 0.85,
@@ -158,28 +188,65 @@ export function convertLevelToScene(level: LevelData): SceneData {
     z: v.y * SCALE,
   });
 
-  // Helper function to create a wall quad
+  // Helper function to create a wall quad with UVs
   function createWallQuad(
     v1: Vertex,
     v2: Vertex,
     bottomHeight: number,
     topHeight: number,
     materialIndex: number,
-    flip: boolean
+    flip: boolean,
+    textureName: string = '',
+    xOffset: number = 0,
+    yOffset: number = 0
   ): Triangle[] {
     const p1 = convertVertex(v1, bottomHeight);
     const p2 = convertVertex(v2, bottomHeight);
     const p3 = convertVertex(v2, topHeight);
     const p4 = convertVertex(v1, topHeight);
 
+    // Calculate wall dimensions in Doom units
+    const wallLength = Math.sqrt(
+      (v2.x - v1.x) * (v2.x - v1.x) + (v2.y - v1.y) * (v2.y - v1.y)
+    );
+    const wallHeight = topHeight - bottomHeight;
+
+    // Get texture dimensions (default to 64x64 if not found)
+    let texWidth = 64;
+    let texHeight = 64;
+    const texIndex = getTextureIndex(textureName);
+
+    if (textureAtlas && textureName) {
+      const upperName = textureName.toUpperCase().replace(/\0/g, '').replace(/-/g, '');
+      const entry = textureAtlas.entries.get(upperName);
+      if (entry) {
+        texWidth = entry.width;
+        texHeight = entry.height;
+      }
+    }
+
+    // Calculate UV coordinates
+    // U runs along the wall length, V runs vertically
+    const uvU0 = xOffset / texWidth;
+    const uvU1 = (xOffset + wallLength) / texWidth;
+    const uvV0 = yOffset / texHeight;
+    const uvV1 = (yOffset + wallHeight) / texHeight;
+
+    // Create UV coordinates for quad corners
+    // p1 = bottom-left, p2 = bottom-right, p3 = top-right, p4 = top-left
+    const uv1: Vec2 = { u: uvU0, v: uvV1 }; // bottom-left
+    const uv2: Vec2 = { u: uvU1, v: uvV1 }; // bottom-right
+    const uv3: Vec2 = { u: uvU1, v: uvV0 }; // top-right
+    const uv4: Vec2 = { u: uvU0, v: uvV0 }; // top-left
+
     const tris: Triangle[] = [];
 
     if (flip) {
-      tris.push(createTriangle(p2, p1, p4, materialIndex));
-      tris.push(createTriangle(p2, p4, p3, materialIndex));
+      tris.push(createTriangleWithUV(p2, p1, p4, materialIndex, uv2, uv1, uv4, texIndex));
+      tris.push(createTriangleWithUV(p2, p4, p3, materialIndex, uv2, uv4, uv3, texIndex));
     } else {
-      tris.push(createTriangle(p1, p2, p3, materialIndex));
-      tris.push(createTriangle(p1, p3, p4, materialIndex));
+      tris.push(createTriangleWithUV(p1, p2, p3, materialIndex, uv1, uv2, uv3, texIndex));
+      tris.push(createTriangleWithUV(p1, p3, p4, materialIndex, uv1, uv3, uv4, texIndex));
     }
 
     return tris;
@@ -204,13 +271,19 @@ export function convertLevelToScene(level: LevelData): SceneData {
           // Upper wall
           if (sector.ceilingHeight > backSector.ceilingHeight) {
             const mat = getMaterial('wall', sector.lightLevel, sidedef.upperTexture);
-            triangles.push(...createWallQuad(v1, v2, backSector.ceilingHeight, sector.ceilingHeight, mat, false));
+            triangles.push(...createWallQuad(
+              v1, v2, backSector.ceilingHeight, sector.ceilingHeight, mat, false,
+              sidedef.upperTexture, sidedef.xOffset, sidedef.yOffset
+            ));
           }
 
           // Lower wall
           if (sector.floorHeight < backSector.floorHeight) {
             const mat = getMaterial('wall', sector.lightLevel, sidedef.lowerTexture);
-            triangles.push(...createWallQuad(v1, v2, sector.floorHeight, backSector.floorHeight, mat, false));
+            triangles.push(...createWallQuad(
+              v1, v2, sector.floorHeight, backSector.floorHeight, mat, false,
+              sidedef.lowerTexture, sidedef.xOffset, sidedef.yOffset
+            ));
           }
 
           // Middle texture (if present, for fences/gratings)
@@ -219,14 +292,20 @@ export function convertLevelToScene(level: LevelData): SceneData {
             const top = Math.min(sector.ceilingHeight, backSector.ceilingHeight);
             const bottom = Math.max(sector.floorHeight, backSector.floorHeight);
             if (top > bottom) {
-              triangles.push(...createWallQuad(v1, v2, bottom, top, mat, false));
+              triangles.push(...createWallQuad(
+                v1, v2, bottom, top, mat, false,
+                sidedef.middleTexture, sidedef.xOffset, sidedef.yOffset
+              ));
             }
           }
         }
       } else {
         // One-sided linedef
         const mat = getMaterial('wall', sector.lightLevel, sidedef.middleTexture);
-        triangles.push(...createWallQuad(v1, v2, sector.floorHeight, sector.ceilingHeight, mat, false));
+        triangles.push(...createWallQuad(
+          v1, v2, sector.floorHeight, sector.ceilingHeight, mat, false,
+          sidedef.middleTexture, sidedef.xOffset, sidedef.yOffset
+        ));
       }
     }
 
@@ -243,13 +322,19 @@ export function convertLevelToScene(level: LevelData): SceneData {
           // Upper wall (from back side)
           if (sector.ceilingHeight > frontSector.ceilingHeight) {
             const mat = getMaterial('wall', sector.lightLevel, sidedef.upperTexture);
-            triangles.push(...createWallQuad(v1, v2, frontSector.ceilingHeight, sector.ceilingHeight, mat, true));
+            triangles.push(...createWallQuad(
+              v1, v2, frontSector.ceilingHeight, sector.ceilingHeight, mat, true,
+              sidedef.upperTexture, sidedef.xOffset, sidedef.yOffset
+            ));
           }
 
           // Lower wall (from back side)
           if (sector.floorHeight < frontSector.floorHeight) {
             const mat = getMaterial('wall', sector.lightLevel, sidedef.lowerTexture);
-            triangles.push(...createWallQuad(v1, v2, sector.floorHeight, frontSector.floorHeight, mat, true));
+            triangles.push(...createWallQuad(
+              v1, v2, sector.floorHeight, frontSector.floorHeight, mat, true,
+              sidedef.lowerTexture, sidedef.xOffset, sidedef.yOffset
+            ));
           }
         }
       }
@@ -257,7 +342,7 @@ export function convertLevelToScene(level: LevelData): SceneData {
   }
 
   // Build floor and ceiling polygons for each sector
-  const sectorPolygons = buildSectorPolygons(level);
+  const sectorPolygons = buildSectorPolygonsFromLinedefs(level);
 
   for (const polygon of sectorPolygons) {
     const sector = level.sectors[polygon.sectorIndex];
@@ -274,13 +359,19 @@ export function convertLevelToScene(level: LevelData): SceneData {
       : getMaterial('ceiling', sector.lightLevel, sector.ceilingTexture);
 
     // Triangulate and add floor
-    const floorTris = triangulatePolygon(polygon.vertices, sector.floorHeight * SCALE, false);
+    const floorTris = triangulatePolygon(
+      polygon.vertices, sector.floorHeight * SCALE, false,
+      sector.floorTexture
+    );
     for (const tri of floorTris) {
       triangles.push({ ...tri, materialIndex: floorMat });
     }
 
     // Triangulate and add ceiling
-    const ceilingTris = triangulatePolygon(polygon.vertices, sector.ceilingHeight * SCALE, true);
+    const ceilingTris = triangulatePolygon(
+      polygon.vertices, sector.ceilingHeight * SCALE, true,
+      isSky ? '' : sector.ceilingTexture  // No texture for sky
+    );
     for (const tri of ceilingTris) {
       triangles.push({ ...tri, materialIndex: ceilingMat });
     }
@@ -291,13 +382,33 @@ export function convertLevelToScene(level: LevelData): SceneData {
   return { triangles, materials };
 }
 
-// Create a triangle with computed normal
+// Create a triangle with computed normal (no texture)
 function createTriangle(v0: Vec3, v1: Vec3, v2: Vec3, materialIndex: number): Triangle {
   const edge1 = subtract(v1, v0);
   const edge2 = subtract(v2, v0);
   const normal = normalize(cross(edge1, edge2));
 
-  return { v0, v1, v2, normal, materialIndex };
+  return {
+    v0, v1, v2, normal, materialIndex,
+    uv0: { u: 0, v: 0 },
+    uv1: { u: 1, v: 0 },
+    uv2: { u: 1, v: 1 },
+    textureIndex: -1,
+  };
+}
+
+// Create a triangle with computed normal and UVs
+function createTriangleWithUV(
+  v0: Vec3, v1: Vec3, v2: Vec3,
+  materialIndex: number,
+  uv0: Vec2, uv1: Vec2, uv2: Vec2,
+  textureIndex: number
+): Triangle {
+  const edge1 = subtract(v1, v0);
+  const edge2 = subtract(v2, v0);
+  const normal = normalize(cross(edge1, edge2));
+
+  return { v0, v1, v2, normal, materialIndex, uv0, uv1, uv2, textureIndex };
 }
 
 function subtract(a: Vec3, b: Vec3): Vec3 {
@@ -318,8 +429,51 @@ function normalize(v: Vec3): Vec3 {
   return { x: v.x / len, y: v.y / len, z: v.z / len };
 }
 
-// Build polygons for each sector by tracing linedef edges
-function buildSectorPolygons(level: LevelData): SectorPolygon[] {
+// Build polygons from BSP subsectors (these are convex, easy to triangulate)
+function buildSectorPolygonsFromSubsectors(level: LevelData): SectorPolygon[] {
+  const polygons: SectorPolygon[] = [];
+
+  // If no subsector data, fall back to linedef tracing
+  if (!level.subsectors || level.subsectors.length === 0 || !level.segs || level.segs.length === 0) {
+    console.warn('No subsector data, falling back to linedef polygon building');
+    return buildSectorPolygonsFromLinedefs(level);
+  }
+
+  for (const subsector of level.subsectors) {
+    const vertices: Vec3[] = [];
+    let sectorIndex = -1;
+
+    // Collect vertices from segs
+    for (let i = 0; i < subsector.segCount; i++) {
+      const segIndex = subsector.firstSeg + i;
+      if (segIndex >= level.segs.length) continue;
+
+      const seg = level.segs[segIndex];
+      const v = level.vertices[seg.startVertex];
+      vertices.push({ x: v.x * SCALE, y: 0, z: v.y * SCALE });
+
+      // Get sector from the linedef's sidedef
+      if (sectorIndex === -1 && seg.linedef < level.linedefs.length) {
+        const linedef = level.linedefs[seg.linedef];
+        // seg.direction: 0 = same as linedef (use right sidedef), 1 = opposite (use left sidedef)
+        const sidedefIndex = seg.direction === 0 ? linedef.rightSidedef : linedef.leftSidedef;
+        if (sidedefIndex !== -1 && sidedefIndex < level.sidedefs.length) {
+          sectorIndex = level.sidedefs[sidedefIndex].sector;
+        }
+      }
+    }
+
+    if (vertices.length >= 3 && sectorIndex !== -1) {
+      polygons.push({ sectorIndex, vertices });
+    }
+  }
+
+  console.log(`Built ${polygons.length} polygons from ${level.subsectors.length} subsectors`);
+  return polygons;
+}
+
+// Fallback: Build polygons by tracing linedef edges
+function buildSectorPolygonsFromLinedefs(level: LevelData): SectorPolygon[] {
   const polygons: SectorPolygon[] = [];
 
   const sectorLinedefs: Map<number, { linedef: Linedef; startVertex: number; endVertex: number }[]> = new Map();
@@ -409,18 +563,201 @@ function buildSectorPolygons(level: LevelData): SectorPolygon[] {
   return polygons;
 }
 
-// Simple fan triangulation
-function triangulatePolygon(vertices: Vec3[], height: number, flip: boolean): Triangle[] {
+// Cross product for 2D vectors (returns z component)
+function cross2D(ax: number, az: number, bx: number, bz: number): number {
+  return ax * bz - az * bx;
+}
+
+// Check if point P is inside triangle ABC using barycentric coordinates
+function pointInTriangle(
+  px: number, pz: number,
+  ax: number, az: number,
+  bx: number, bz: number,
+  cx: number, cz: number
+): boolean {
+  const v0x = cx - ax, v0z = cz - az;
+  const v1x = bx - ax, v1z = bz - az;
+  const v2x = px - ax, v2z = pz - az;
+
+  const dot00 = v0x * v0x + v0z * v0z;
+  const dot01 = v0x * v1x + v0z * v1z;
+  const dot02 = v0x * v2x + v0z * v2z;
+  const dot11 = v1x * v1x + v1z * v1z;
+  const dot12 = v1x * v2x + v1z * v2z;
+
+  const denom = dot00 * dot11 - dot01 * dot01;
+  if (Math.abs(denom) < 1e-10) return false;
+
+  const invDenom = 1 / denom;
+  const u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+  const v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+
+  // Use small epsilon for edge cases
+  return (u >= -1e-6) && (v >= -1e-6) && (u + v <= 1 + 1e-6);
+}
+
+// Ear clipping triangulation
+function triangulatePolygon(
+  vertices: Vec3[],
+  height: number,
+  flip: boolean,
+  flatTexture: string = ''
+): Triangle[] {
   if (vertices.length < 3) return [];
 
   const triangles: Triangle[] = [];
-  const verts = vertices.map(v => ({ x: v.x, y: height, z: v.z }));
 
-  for (let i = 1; i < verts.length - 1; i++) {
+  // Get texture index for flat
+  const texIndex = getTextureIndex(flatTexture);
+
+  // Work with indices into original array
+  const indices: number[] = [];
+  for (let i = 0; i < vertices.length; i++) {
+    indices.push(i);
+  }
+
+  // Remove duplicate/near-duplicate vertices
+  const cleaned: number[] = [];
+  for (let i = 0; i < indices.length; i++) {
+    const curr = indices[i];
+    const next = indices[(i + 1) % indices.length];
+    const dx = vertices[curr].x - vertices[next].x;
+    const dz = vertices[curr].z - vertices[next].z;
+    if (dx * dx + dz * dz > 1e-10) {
+      cleaned.push(curr);
+    }
+  }
+
+  if (cleaned.length < 3) return [];
+
+  // Calculate signed area to determine winding
+  let area = 0;
+  for (let i = 0; i < cleaned.length; i++) {
+    const j = (i + 1) % cleaned.length;
+    area += vertices[cleaned[i]].x * vertices[cleaned[j]].z;
+    area -= vertices[cleaned[j]].x * vertices[cleaned[i]].z;
+  }
+  const clockwise = area < 0;
+
+  // Ear clipping
+  const remaining = [...cleaned];
+  let safety = 0;
+  const maxIter = remaining.length * remaining.length;
+
+  while (remaining.length > 3 && safety < maxIter) {
+    safety++;
+    let earFound = false;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const n = remaining.length;
+      const prevIdx = remaining[(i + n - 1) % n];
+      const currIdx = remaining[i];
+      const nextIdx = remaining[(i + 1) % n];
+
+      const ax = vertices[prevIdx].x, az = vertices[prevIdx].z;
+      const bx = vertices[currIdx].x, bz = vertices[currIdx].z;
+      const cx = vertices[nextIdx].x, cz = vertices[nextIdx].z;
+
+      // Check if this is a convex vertex
+      const cross = cross2D(bx - ax, bz - az, cx - bx, cz - bz);
+      const isConvex = clockwise ? cross <= 0 : cross >= 0;
+
+      if (!isConvex) continue;
+
+      // Check no other vertex is inside this triangle
+      let hasPointInside = false;
+      for (let j = 0; j < remaining.length; j++) {
+        if (j === (i + n - 1) % n || j === i || j === (i + 1) % n) continue;
+        const idx = remaining[j];
+        if (pointInTriangle(vertices[idx].x, vertices[idx].z, ax, az, bx, bz, cx, cz)) {
+          hasPointInside = true;
+          break;
+        }
+      }
+
+      if (!hasPointInside) {
+        // This is an ear - create triangle
+        const v0 = { x: vertices[prevIdx].x, y: height, z: vertices[prevIdx].z };
+        const v1 = { x: vertices[currIdx].x, y: height, z: vertices[currIdx].z };
+        const v2 = { x: vertices[nextIdx].x, y: height, z: vertices[nextIdx].z };
+
+        if (flip) {
+          triangles.push(createTriangleWithUV(
+            v0, v2, v1, 0,
+            { u: v0.x, v: v0.z },
+            { u: v2.x, v: v2.z },
+            { u: v1.x, v: v1.z },
+            texIndex
+          ));
+        } else {
+          triangles.push(createTriangleWithUV(
+            v0, v1, v2, 0,
+            { u: v0.x, v: v0.z },
+            { u: v1.x, v: v1.z },
+            { u: v2.x, v: v2.z },
+            texIndex
+          ));
+        }
+
+        remaining.splice(i, 1);
+        earFound = true;
+        break;
+      }
+    }
+
+    if (!earFound) {
+      // Fallback: just create a triangle from first 3 vertices
+      const prevIdx = remaining[0];
+      const currIdx = remaining[1];
+      const nextIdx = remaining[2];
+
+      const v0 = { x: vertices[prevIdx].x, y: height, z: vertices[prevIdx].z };
+      const v1 = { x: vertices[currIdx].x, y: height, z: vertices[currIdx].z };
+      const v2 = { x: vertices[nextIdx].x, y: height, z: vertices[nextIdx].z };
+
+      if (flip) {
+        triangles.push(createTriangleWithUV(
+          v0, v2, v1, 0,
+          { u: v0.x, v: v0.z },
+          { u: v2.x, v: v2.z },
+          { u: v1.x, v: v1.z },
+          texIndex
+        ));
+      } else {
+        triangles.push(createTriangleWithUV(
+          v0, v1, v2, 0,
+          { u: v0.x, v: v0.z },
+          { u: v1.x, v: v1.z },
+          { u: v2.x, v: v2.z },
+          texIndex
+        ));
+      }
+      remaining.splice(1, 1);
+    }
+  }
+
+  // Handle final triangle
+  if (remaining.length === 3) {
+    const v0 = { x: vertices[remaining[0]].x, y: height, z: vertices[remaining[0]].z };
+    const v1 = { x: vertices[remaining[1]].x, y: height, z: vertices[remaining[1]].z };
+    const v2 = { x: vertices[remaining[2]].x, y: height, z: vertices[remaining[2]].z };
+
     if (flip) {
-      triangles.push(createTriangle(verts[0], verts[i + 1], verts[i], 0));
+      triangles.push(createTriangleWithUV(
+        v0, v2, v1, 0,
+        { u: v0.x, v: v0.z },
+        { u: v2.x, v: v2.z },
+        { u: v1.x, v: v1.z },
+        texIndex
+      ));
     } else {
-      triangles.push(createTriangle(verts[0], verts[i], verts[i + 1], 0));
+      triangles.push(createTriangleWithUV(
+        v0, v1, v2, 0,
+        { u: v0.x, v: v0.z },
+        { u: v1.x, v: v1.z },
+        { u: v2.x, v: v2.z },
+        texIndex
+      ));
     }
   }
 
