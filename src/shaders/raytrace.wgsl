@@ -186,7 +186,13 @@ fn reflect_dir(incident: vec3f, normal: vec3f) -> vec3f {
   return incident - 2.0 * dot(incident, normal) * normal;
 }
 
-// Sample texture from atlas
+// Increase saturation of a color
+fn saturate_color(color: vec3f, saturation: f32) -> vec3f {
+  let luminance = dot(color, vec3f(0.299, 0.587, 0.114));
+  return mix(vec3f(luminance), color, saturation);
+}
+
+// Sample texture from atlas with saturation boost
 fn sample_texture(texture_index: i32, uv: vec2f, atlas_size: vec2f) -> vec4f {
   if (texture_index < 0) {
     return vec4f(1.0, 1.0, 1.0, 1.0);  // No texture, return white
@@ -201,7 +207,16 @@ fn sample_texture(texture_index: i32, uv: vec2f, atlas_size: vec2f) -> vec4f {
   let atlas_u = (entry.x + local_u * entry.width) / atlas_size.x;
   let atlas_v = (entry.y + local_v * entry.height) / atlas_size.y;
 
-  return textureSampleLevel(texture_atlas, atlas_sampler, vec2f(atlas_u, atlas_v), 0.0);
+  var color = textureSampleLevel(texture_atlas, atlas_sampler, vec2f(atlas_u, atlas_v), 0.0);
+
+  // Boost saturation (1.0 = normal, >1.0 = more saturated)
+  // Extra boost for warm colors (reds/browns)
+  let warmth = max(color.r - max(color.g, color.b), 0.0);
+  let saturation_boost = 1.4 + warmth * 0.4;  // 1.4 base, up to 1.8 for warm colors
+
+  color = vec4f(saturate_color(color.rgb, saturation_boost), color.a);
+
+  return color;
 }
 
 // Triangle hit result with barycentric coordinates

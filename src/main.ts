@@ -120,6 +120,8 @@ async function main() {
   // UI Controls
   const samplesSlider = document.getElementById('samples') as HTMLInputElement;
   const samplesValue = document.getElementById('samples-value') as HTMLSpanElement;
+  const bouncesSlider = document.getElementById('bounces') as HTMLInputElement;
+  const bouncesValue = document.getElementById('bounces-value') as HTMLSpanElement;
   const resolutionSelect = document.getElementById('resolution') as HTMLSelectElement;
   const temporalCheckbox = document.getElementById('temporal') as HTMLInputElement;
   const denoiseCheckbox = document.getElementById('denoise') as HTMLInputElement;
@@ -140,6 +142,13 @@ async function main() {
     samplesValue.textContent = String(samples);
   });
 
+  // Max bounces
+  bouncesSlider.addEventListener('input', () => {
+    const bounces = parseInt(bouncesSlider.value);
+    renderer.maxBounces = bounces;
+    bouncesValue.textContent = String(bounces);
+  });
+
   // Resolution scale (requires recreating renderer)
   resolutionSelect.addEventListener('change', async () => {
     Renderer.RESOLUTION_SCALE = parseFloat(resolutionSelect.value);
@@ -147,6 +156,7 @@ async function main() {
     await renderer.initialize();
     // Restore settings
     renderer.samplesPerPixel = Math.pow(2, parseInt(samplesSlider.value));
+    renderer.maxBounces = parseInt(bouncesSlider.value);
     renderer.enableTemporalReprojection = temporalCheckbox.checked;
     renderer.enableSpatialDenoise = denoiseCheckbox.checked;
   });

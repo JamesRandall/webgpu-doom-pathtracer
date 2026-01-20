@@ -73,6 +73,7 @@ export class Renderer {
   public enableTemporalReprojection = false;
   public enableSpatialDenoise = true;
   public samplesPerPixel = 16;
+  public maxBounces = 4;
 
   constructor(
     device: GPUDevice,
@@ -702,7 +703,7 @@ export class Renderer {
       this.triangleCount,
       this.nodeCount,
       this.frameCount,
-      4, // max bounces
+      this.maxBounces, // max bounces
       this.samplesPerPixel,
       this.atlasWidth,
       this.atlasHeight,
