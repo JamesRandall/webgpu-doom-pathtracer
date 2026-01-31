@@ -63,7 +63,7 @@ async function main() {
     // Set the atlas for UV generation
     setTextureAtlas(textureAtlas);
 
-    const levelData = wad.parseLevel('E1M1');
+    const levelData = wad.parseLevel('E1M2');
     scene = convertLevelToScene(levelData);
 
     // Find player start position from THINGS
@@ -127,17 +127,18 @@ async function main() {
   const denoiseCheckbox = document.getElementById('denoise') as HTMLInputElement;
 
   // Set initial values from renderer
-  // Samples slider uses powers of 2: slider value 0-10 maps to 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024
-  const samplesPow = Math.log2(renderer.samplesPerPixel);
-  samplesSlider.value = String(samplesPow);
+  // Samples slider: 0 = 1 sample, 1-16 = 4, 8, 12, ... 64 (increments of 4)
+  const sliderFromSamples = (s: number) => s === 1 ? 0 : s / 4;
+  const samplesToSlider = (v: number) => v === 0 ? 1 : v * 4;
+  samplesSlider.value = String(sliderFromSamples(renderer.samplesPerPixel));
   samplesValue.textContent = String(renderer.samplesPerPixel);
   resolutionSelect.value = String(Renderer.RESOLUTION_SCALE);
   temporalCheckbox.checked = renderer.enableTemporalReprojection;
   denoiseCheckbox.checked = renderer.enableSpatialDenoise;
 
-  // Samples per pixel (powers of 2: 1, 2, 4, 8, ... 1024)
+  // Samples per pixel: 1, 4, 8, 12, 16, ... 64
   samplesSlider.addEventListener('input', () => {
-    const samples = Math.pow(2, parseInt(samplesSlider.value));
+    const samples = samplesToSlider(parseInt(samplesSlider.value));
     renderer.samplesPerPixel = samples;
     samplesValue.textContent = String(samples);
   });
@@ -155,7 +156,7 @@ async function main() {
     renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), scene.triangles, scene.materials, textureAtlas);
     await renderer.initialize();
     // Restore settings
-    renderer.samplesPerPixel = Math.pow(2, parseInt(samplesSlider.value));
+    renderer.samplesPerPixel = samplesToSlider(parseInt(samplesSlider.value));
     renderer.maxBounces = parseInt(bouncesSlider.value);
     renderer.enableTemporalReprojection = temporalCheckbox.checked;
     renderer.enableSpatialDenoise = denoiseCheckbox.checked;

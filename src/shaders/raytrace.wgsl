@@ -322,7 +322,18 @@ fn get_tri_count(node: BVHNode) -> u32 {
   return node.right_child_or_count & 0x7FFFFFFFu;
 }
 
-// Trace ray using BVH
+// Ray-AABB intersection returning t values for ordered traversal
+fn intersect_aabb_t(ray_origin: vec3f, ray_dir_inv: vec3f, box_min: vec3f, box_max: vec3f) -> vec2f {
+  let t1 = (box_min - ray_origin) * ray_dir_inv;
+  let t2 = (box_max - ray_origin) * ray_dir_inv;
+
+  let tmin = max(max(min(t1.x, t2.x), min(t1.y, t2.y)), min(t1.z, t2.z));
+  let tmax = min(min(max(t1.x, t2.x), max(t1.y, t2.y)), max(t1.z, t2.z));
+
+  return vec2f(tmin, tmax);
+}
+
+// Trace ray using BVH with ordered traversal
 fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   var closest_hit: HitInfo;
   closest_hit.t = 1e30;
@@ -378,10 +389,38 @@ fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
       let right_child = node.right_child_or_count;
 
       if (stack_ptr < MAX_STACK_SIZE - 1u) {
-        stack[stack_ptr] = left_child;
-        stack_ptr += 1u;
-        stack[stack_ptr] = right_child;
-        stack_ptr += 1u;
+        // Get both children nodes
+        let left_node = bvh_nodes[left_child];
+        let right_node = bvh_nodes[right_child];
+
+        // Test both boxes and get t values
+        let left_t = intersect_aabb_t(ray_origin, ray_dir_inv, left_node.min_bounds, left_node.max_bounds);
+        let right_t = intersect_aabb_t(ray_origin, ray_dir_inv, right_node.min_bounds, right_node.max_bounds);
+
+        let left_hit = left_t.y >= left_t.x && left_t.x < closest_hit.t && left_t.y > 0.0;
+        let right_hit = right_t.y >= right_t.x && right_t.x < closest_hit.t && right_t.y > 0.0;
+
+        // Push children in far-to-near order (so near is popped first)
+        if (left_hit && right_hit) {
+          // Both hit - push far one first, near one second
+          if (left_t.x < right_t.x) {
+            stack[stack_ptr] = right_child;
+            stack_ptr += 1u;
+            stack[stack_ptr] = left_child;
+            stack_ptr += 1u;
+          } else {
+            stack[stack_ptr] = left_child;
+            stack_ptr += 1u;
+            stack[stack_ptr] = right_child;
+            stack_ptr += 1u;
+          }
+        } else if (left_hit) {
+          stack[stack_ptr] = left_child;
+          stack_ptr += 1u;
+        } else if (right_hit) {
+          stack[stack_ptr] = right_child;
+          stack_ptr += 1u;
+        }
       }
     }
   }
