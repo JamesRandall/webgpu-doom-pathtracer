@@ -57,6 +57,26 @@ export class BVHBuilder {
     // Build the tree recursively
     this.buildRecursive(triangles, 0, triangles.length);
 
+    // Log BVH diagnostics
+    let maxDepth = 0;
+    let leafCount = 0;
+    let maxLeafTris = 0;
+    let totalLeafTris = 0;
+    const measureDepth = (idx: number, depth: number) => {
+      const n = this.nodes[idx];
+      if (n.triangleCount > 0) {
+        maxDepth = Math.max(maxDepth, depth);
+        leafCount++;
+        maxLeafTris = Math.max(maxLeafTris, n.triangleCount);
+        totalLeafTris += n.triangleCount;
+      } else {
+        measureDepth(n.leftChild, depth + 1);
+        measureDepth(n.rightChild, depth + 1);
+      }
+    };
+    if (this.nodes.length > 0) measureDepth(0, 0);
+    console.log(`BVH: ${this.nodes.length} nodes, depth=${maxDepth}, ${leafCount} leaves, avg ${(totalLeafTris/leafCount).toFixed(1)} tris/leaf, max ${maxLeafTris} tris/leaf`);
+
     return {
       nodes: this.nodes,
       orderedTriangles: this.orderedTriangles,

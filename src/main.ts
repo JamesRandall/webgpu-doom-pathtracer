@@ -1,10 +1,14 @@
-import { Renderer } from './renderer';
-import { createCornellBox } from './scene/geometry';
+import { Renderer, Camera } from './renderer';
+import { createCornellBox, SceneData } from './scene/geometry';
 import { CameraController } from './camera';
 import { WadParser } from './doom/wad-parser';
 import { convertLevelToScene, setTextureAtlas } from './doom/level-converter';
 import { CollisionDetector } from './doom/collision';
 import { TextureExtractor, TextureAtlas } from './doom/textures';
+import { createDungeonScene } from './scene/dungeon';
+import { DungeonCameraController } from './scene/dungeon-camera';
+
+type ActiveScene = 'doom' | 'dungeon';
 
 async function main() {
   const errorDiv = document.getElementById('error') as HTMLDivElement;
@@ -42,10 +46,10 @@ async function main() {
     alphaMode: 'premultiplied',
   });
 
-  // Try to load Doom WAD, fall back to Cornell box
-  let scene;
-  let cameraController: CameraController;
-  let textureAtlas: TextureAtlas | null = null;
+  // --- Scene 1: Doom (or Cornell box fallback) ---
+  let doomScene: SceneData;
+  let doomCameraController: CameraController;
+  let doomTextureAtlas: TextureAtlas | null = null;
 
   try {
     const response = await fetch('/wads/DOOM1.WAD');
@@ -55,52 +59,41 @@ async function main() {
 
     console.log('Available levels:', wad.getLevelNames());
 
-    // Extract textures and build atlas
     const textureExtractor = new TextureExtractor(wad);
     textureExtractor.extractAll();
-    textureAtlas = textureExtractor.buildAtlas();
+    doomTextureAtlas = textureExtractor.buildAtlas();
 
-    // Set the atlas for UV generation
-    setTextureAtlas(textureAtlas);
+    setTextureAtlas(doomTextureAtlas);
 
     const levelData = wad.parseLevel('E1M2');
-    scene = convertLevelToScene(levelData);
+    doomScene = convertLevelToScene(levelData);
 
-    // Find player start position from THINGS
-    const playerStart = levelData.things.find(t => t.type === 1);  // Type 1 = Player 1 start
+    const playerStart = levelData.things.find(t => t.type === 1);
     const startX = playerStart ? playerStart.x / 64 : 0;
     const startZ = playerStart ? playerStart.y / 64 : 0;
     const startAngle = playerStart ? (playerStart.angle * Math.PI / 180) : 0;
 
-    // Find floor height at player start
-    const startY = 0.8;  // Approximate eye height
-
-    // Create collision detector
     const collision = new CollisionDetector(levelData);
-
-    // Get floor height at player start for accurate Y position
     const floorY = collision.getFloorHeight(startX, startZ);
-    const eyeHeight = 0.875;  // ~56 Doom units
+    const eyeHeight = 0.875;
 
-    cameraController = new CameraController(
+    doomCameraController = new CameraController(
       { x: startX, y: floorY + eyeHeight, z: startZ },
-      startAngle - Math.PI / 2,  // Convert Doom angle to our yaw
+      startAngle - Math.PI / 2,
       0,
-      90,   // fov
-      5,    // move speed (faster for larger level)
+      90,
+      5,
       0.002
     );
 
-    // Enable collision detection
-    cameraController.setCollision(collision);
+    doomCameraController.setCollision(collision);
 
-    console.log(`Loaded E1M1: ${scene.triangles.length} triangles, ${scene.materials.length} materials`);
+    console.log(`Loaded Doom: ${doomScene.triangles.length} triangles, ${doomScene.materials.length} materials`);
   } catch (e) {
     console.warn('Failed to load WAD, using Cornell box:', e);
 
-    // Fall back to Cornell box
-    scene = createCornellBox();
-    cameraController = new CameraController(
+    doomScene = createCornellBox();
+    doomCameraController = new CameraController(
       { x: 0, y: 0, z: -4.5 },
       0,
       0,
@@ -109,12 +102,30 @@ async function main() {
       0.002
     );
 
-    console.log(`Scene: ${scene.triangles.length} triangles, ${scene.materials.length} materials`);
+    console.log(`Scene: ${doomScene.triangles.length} triangles, ${doomScene.materials.length} materials`);
   }
 
-  cameraController.attach(canvas);
+  // --- Scene 2: Dungeon Crawler ---
+  const dungeonScene = createDungeonScene();
+  const dungeonCameraController = new DungeonCameraController();
 
-  let renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), scene.triangles, scene.materials, textureAtlas);
+  // --- Scene switching ---
+  let activeScene: ActiveScene = 'doom';
+  let currentCamera: { update(dt: number): void; getCamera(): Camera; attach(c: HTMLCanvasElement): void } = doomCameraController;
+
+  function getActiveSceneData(): { scene: SceneData; atlas: TextureAtlas | null } {
+    if (activeScene === 'dungeon') {
+      return { scene: dungeonScene, atlas: null };
+    }
+    return { scene: doomScene, atlas: doomTextureAtlas };
+  }
+
+  // Attach both controllers for input, but only the active one will be updated
+  doomCameraController.attach(canvas);
+  dungeonCameraController.attach(canvas);
+
+  let { scene, atlas } = getActiveSceneData();
+  let renderer = new Renderer(device, context, format, canvas.width, canvas.height, currentCamera.getCamera(), scene.triangles, scene.materials, atlas);
   await renderer.initialize();
 
   // UI Controls
@@ -123,8 +134,15 @@ async function main() {
   const bouncesSlider = document.getElementById('bounces') as HTMLInputElement;
   const bouncesValue = document.getElementById('bounces-value') as HTMLSpanElement;
   const resolutionSelect = document.getElementById('resolution') as HTMLSelectElement;
-  const temporalCheckbox = document.getElementById('temporal') as HTMLInputElement;
+  const temporalSlider = document.getElementById('temporal') as HTMLInputElement;
+  const temporalValue = document.getElementById('temporal-value') as HTMLSpanElement;
   const denoiseCheckbox = document.getElementById('denoise') as HTMLInputElement;
+  const playerLightSlider = document.getElementById('player-light') as HTMLInputElement;
+  const playerLightValue = document.getElementById('player-light-value') as HTMLSpanElement;
+  const playerLightLabel = document.getElementById('player-light-label') as HTMLLabelElement;
+  const playerFalloffSlider = document.getElementById('player-falloff') as HTMLInputElement;
+  const playerFalloffValue = document.getElementById('player-falloff-value') as HTMLSpanElement;
+  const playerFalloffLabel = document.getElementById('player-falloff-label') as HTMLLabelElement;
 
   // Set initial values from renderer
   // Samples slider: 0 = 1 sample, 1-16 = 4, 8, 12, ... 64 (increments of 4)
@@ -133,7 +151,8 @@ async function main() {
   samplesSlider.value = String(sliderFromSamples(renderer.samplesPerPixel));
   samplesValue.textContent = String(renderer.samplesPerPixel);
   resolutionSelect.value = String(Renderer.RESOLUTION_SCALE);
-  temporalCheckbox.checked = renderer.enableTemporalReprojection;
+  temporalSlider.value = String(renderer.temporalFrames);
+  temporalValue.textContent = String(renderer.temporalFrames);
   denoiseCheckbox.checked = renderer.enableSpatialDenoise;
 
   // Samples per pixel: 1, 4, 8, 12, 16, ... 64
@@ -150,27 +169,75 @@ async function main() {
     bouncesValue.textContent = String(bounces);
   });
 
+  // Helper to recreate the renderer with current scene
+  async function recreateRenderer() {
+    const data = getActiveSceneData();
+    scene = data.scene;
+    atlas = data.atlas;
+    renderer = new Renderer(device, context, format, canvas.width, canvas.height, currentCamera.getCamera(), scene.triangles, scene.materials, atlas);
+    await renderer.initialize();
+    renderer.samplesPerPixel = samplesToSlider(parseInt(samplesSlider.value));
+    renderer.maxBounces = parseInt(bouncesSlider.value);
+    renderer.temporalFrames = parseInt(temporalSlider.value);
+    renderer.enableSpatialDenoise = denoiseCheckbox.checked;
+    const showDungeon = activeScene === 'dungeon' ? '' : 'none';
+    playerLightLabel.style.display = showDungeon;
+    playerFalloffLabel.style.display = showDungeon;
+    applyPlayerLight();
+  }
+
+  // Scene switching: 1 = Doom, 2 = Dungeon
+  window.addEventListener('keydown', async (e) => {
+    if (e.code === 'Digit1' && activeScene !== 'doom') {
+      activeScene = 'doom';
+      currentCamera = doomCameraController;
+      dungeonCameraController.active = false;
+      await recreateRenderer();
+      console.log('Switched to Doom scene');
+    } else if (e.code === 'Digit2' && activeScene !== 'dungeon') {
+      activeScene = 'dungeon';
+      currentCamera = dungeonCameraController;
+      dungeonCameraController.active = true;
+      await recreateRenderer();
+      console.log('Switched to Dungeon scene');
+    }
+  });
+
   // Resolution scale (requires recreating renderer)
   resolutionSelect.addEventListener('change', async () => {
     Renderer.RESOLUTION_SCALE = parseFloat(resolutionSelect.value);
-    renderer = new Renderer(device, context, format, canvas.width, canvas.height, cameraController.getCamera(), scene.triangles, scene.materials, textureAtlas);
-    await renderer.initialize();
-    // Restore settings
-    renderer.samplesPerPixel = samplesToSlider(parseInt(samplesSlider.value));
-    renderer.maxBounces = parseInt(bouncesSlider.value);
-    renderer.enableTemporalReprojection = temporalCheckbox.checked;
-    renderer.enableSpatialDenoise = denoiseCheckbox.checked;
+    await recreateRenderer();
   });
 
   // Temporal reprojection
-  temporalCheckbox.addEventListener('change', () => {
-    renderer.enableTemporalReprojection = temporalCheckbox.checked;
+  temporalSlider.addEventListener('input', () => {
+    const frames = parseInt(temporalSlider.value);
+    renderer.temporalFrames = frames;
+    temporalValue.textContent = String(frames);
   });
 
   // Spatial denoise
   denoiseCheckbox.addEventListener('change', () => {
     renderer.enableSpatialDenoise = denoiseCheckbox.checked;
   });
+
+  // Player torch light intensity and falloff
+  function applyPlayerLight() {
+    const intensity = parseFloat(playerLightSlider.value) / 10.0;
+    const falloff = parseFloat(playerFalloffSlider.value) / 10.0;
+    playerLightValue.textContent = playerLightSlider.value;
+    playerFalloffValue.textContent = playerFalloffSlider.value;
+    if (activeScene === 'dungeon' && intensity > 0) {
+      renderer.playerLightColor = { x: 3.5 * intensity, y: 2.4 * intensity, z: 1.0 * intensity };
+      renderer.playerLightRadius = 6.0;
+      renderer.playerLightFalloff = falloff;
+    } else {
+      renderer.playerLightColor = { x: 0, y: 0, z: 0 };
+      renderer.playerLightRadius = 0;
+    }
+  }
+  playerLightSlider.addEventListener('input', applyPlayerLight);
+  playerFalloffSlider.addEventListener('input', applyPlayerLight);
 
   let lastTime = performance.now();
   const fpsValueElement = document.getElementById('fps-value') as HTMLSpanElement;
@@ -193,8 +260,8 @@ async function main() {
     const deltaTime = (currentTime - lastTime) / 1000;
     lastTime = currentTime;
 
-    cameraController.update(deltaTime);
-    renderer.updateCamera(cameraController.getCamera());
+    currentCamera.update(deltaTime);
+    renderer.updateCamera(currentCamera.getCamera());
     renderer.render();
 
     // Performance metrics tracking

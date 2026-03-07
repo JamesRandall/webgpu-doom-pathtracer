@@ -136,10 +136,17 @@ export function createCubeGrid(gridSize: number, spacing: number, cubeSize: numb
   return triangles;
 }
 
+// Point light for direct light sampling
+export interface PointLight {
+  position: Vec3;
+  color: Vec3;
+}
+
 // Scene result with both triangles and materials
 export interface SceneData {
   triangles: Triangle[];
   materials: Material[];
+  pointLights?: PointLight[];
 }
 
 // Create Cornell box scene

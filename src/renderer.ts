@@ -26,7 +26,7 @@ export class Renderer {
   private textureAtlas: TextureAtlas | null;
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
-  public static RESOLUTION_SCALE = 0.25;
+  public static RESOLUTION_SCALE = 0.5;
   private frameCount: number = 0;
   private nodeCount: number = 0;
   private triangleCount: number = 0;
@@ -70,10 +70,15 @@ export class Renderer {
   private readonly DENOISE_PASSES = 2; // Step sizes: 1, 2, 4, 8, 16
 
   // Post-processing options (public for UI control)
-  public enableTemporalReprojection = false;
+  public temporalFrames = 2;  // 0 = off, 1-5 = number of frames to blend
   public enableSpatialDenoise = true;
   public samplesPerPixel = 16;
   public maxBounces = 4;
+
+  // Player light (point light at camera position)
+  public playerLightColor = { x: 0, y: 0, z: 0 };
+  public playerLightRadius = 0;
+  public playerLightFalloff = 0.5;
 
   constructor(
     device: GPUDevice,
@@ -221,9 +226,9 @@ export class Renderer {
     });
     this.device.queue.writeBuffer(this.bvhBuffer, 0, bvhData);
 
-    // Create scene info buffer (triangle count, node count, frame, bounces, samples_per_pixel, atlas_width, atlas_height, padding)
+    // Create scene info buffer
     this.sceneInfoBuffer = this.device.createBuffer({
-      size: 32,
+      size: 48,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -699,17 +704,25 @@ export class Renderer {
   }
 
   private updateSceneInfoBuffer(): void {
-    const sceneInfo = new Uint32Array([
-      this.triangleCount,
-      this.nodeCount,
-      this.frameCount,
-      this.maxBounces, // max bounces
-      this.samplesPerPixel,
-      this.atlasWidth,
-      this.atlasHeight,
-      0, // padding
-    ]);
-    this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, sceneInfo);
+    const buffer = new ArrayBuffer(48);
+    const u32View = new Uint32Array(buffer);
+    const f32View = new Float32Array(buffer);
+
+    u32View[0] = this.triangleCount;
+    u32View[1] = this.nodeCount;
+    u32View[2] = this.frameCount;
+    u32View[3] = this.maxBounces;
+    u32View[4] = this.samplesPerPixel;
+    u32View[5] = this.atlasWidth;
+    u32View[6] = this.atlasHeight;
+    f32View[7] = this.playerLightFalloff;
+
+    f32View[8] = this.playerLightColor.x;
+    f32View[9] = this.playerLightColor.y;
+    f32View[10] = this.playerLightColor.z;
+    f32View[11] = this.playerLightRadius;
+
+    this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, buffer);
   }
 
   // Build view matrix from camera
@@ -855,13 +868,8 @@ export class Renderer {
     this.updateSceneInfoBuffer();
     this.frameCount++;
 
-    // Update temporal reprojection params
-    // When camera is static, use running average (1/(n+1)) for proper convergence
-    // When moving, use fixed blend factor for temporal stability
-    const isStatic = this.staticFrameCount > 0;
-    const blendFactor = isStatic
-      ? 1.0 / (this.staticFrameCount + 1)  // Running average for convergence
-      : 0.2;  // 20% new sample when moving
+    // Temporal reprojection: blend factor = 1/(N+1) for N history frames
+    const blendFactor = this.temporalFrames > 0 ? 1.0 / (this.temporalFrames + 1) : 1.0;
 
     const temporalParamsData = new ArrayBuffer(32);
     const temporalParamsFloat = new Float32Array(temporalParamsData);
@@ -899,7 +907,7 @@ export class Renderer {
     computePass.end();
 
     // 2. Temporal reprojection pass (optional)
-    if (this.enableTemporalReprojection) {
+    if (this.temporalFrames > 0) {
       const temporalPass = commandEncoder.beginComputePass();
       temporalPass.setPipeline(this.temporalPipeline);
       temporalPass.setBindGroup(0, this.temporalBindGroup);
@@ -920,17 +928,17 @@ export class Renderer {
     }
 
     // Determine input for denoise/display
-    const postTemporalTexture = this.enableTemporalReprojection
+    const postTemporalTexture = this.temporalFrames > 0
       ? this.temporalOutputTexture
       : this.outputTexture;
 
     // 3. À-trous wavelet denoise passes (optional)
-    const skipDenoise = !this.enableSpatialDenoise || (this.enableTemporalReprojection && this.staticFrameCount > 30);
+    const skipDenoise = !this.enableSpatialDenoise;
     const numDenoisePasses = skipDenoise ? 0 : this.DENOISE_PASSES;
 
     // If denoise is enabled but temporal is disabled, copy output to temporalOutput
     // so the denoise bind groups work correctly
-    if (numDenoisePasses > 0 && !this.enableTemporalReprojection) {
+    if (numDenoisePasses > 0 && !this.temporalFrames > 0) {
       commandEncoder.copyTextureToTexture(
         { texture: this.outputTexture },
         { texture: this.temporalOutputTexture },

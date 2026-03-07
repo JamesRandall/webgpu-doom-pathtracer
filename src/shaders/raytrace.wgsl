@@ -63,7 +63,9 @@ struct SceneInfo {
   samples_per_pixel: u32,
   atlas_width: u32,
   atlas_height: u32,
-  _pad2: u32,
+  player_light_falloff: f32,
+  player_light_color: vec3f,
+  player_light_radius: f32,
 }
 
 struct HitInfo {
@@ -445,8 +447,8 @@ fn generate_ray(pixel: vec2f) -> vec3f {
   return normalize(forward + right * ndc.x + up * ndc.y);
 }
 
-// Path trace a single ray
-fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, u32>) -> vec3f {
+// Path trace a single ray, optionally outputting primary hit info for G-buffer
+fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, u32>, out_normal: ptr<function, vec3f>, out_depth: ptr<function, f32>) -> vec3f {
   var ray_origin = ray_origin_in;
   var ray_dir = ray_dir_in;
   var throughput = vec3f(1.0);
@@ -458,6 +460,16 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
     if (!hit.hit) {
       // Miss - return background (dark for indoor scene)
       break;
+    }
+
+    // Output primary hit info for G-buffer on first bounce
+    if (bounce == 0u) {
+      var pn = hit.normal;
+      if (dot(ray_dir, pn) > 0.0) {
+        pn = -pn;
+      }
+      *out_normal = pn;
+      *out_depth = hit.t;
     }
 
     // Get material properties
@@ -489,6 +501,23 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
     var normal = hit.normal;
     if (dot(ray_dir, normal) > 0.0) {
       normal = -normal;
+    }
+
+    // Player torch light (single direct light at camera position)
+    if (scene_info.player_light_radius > 0.0 && bounce == 0u) {
+      let to_light = camera.position - hit_pos;
+      let light_dist = length(to_light);
+      let light_dir = to_light / light_dist;
+      let n_dot_l = max(dot(normal, light_dir), 0.0);
+
+      if (n_dot_l > 0.0) {
+        let shadow_hit = trace_bvh(hit_pos + normal * 0.002, light_dir);
+        if (!shadow_hit.hit || shadow_hit.t > light_dist - 0.01) {
+          let fo = scene_info.player_light_falloff;
+          let falloff = 1.0 / (1.0 + fo * light_dist + 0.25 * fo * light_dist * light_dist);
+          radiance += throughput * surface_color * scene_info.player_light_color * n_dot_l * falloff;
+        }
+      }
     }
 
     // Handle different material types
@@ -595,27 +624,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
     let ray_origin = camera.position;
     let ray_dir = generate_ray(pixel);
 
-    // Get primary ray hit for G-buffer (only first sample)
-    if (s == 0u) {
-      let primary_hit = trace_bvh(ray_origin, ray_dir);
-      if (primary_hit.hit) {
-        primary_normal = primary_hit.normal;
-        if (dot(ray_dir, primary_normal) > 0.0) {
-          primary_normal = -primary_normal;
-        }
-        primary_depth = primary_hit.t;
-      }
-    }
+    // Path trace and accumulate (first sample also outputs G-buffer data)
+    var sample_normal = vec3f(0.0);
+    var sample_depth = 1e30;
+    color += path_trace(ray_origin, ray_dir, &rng_state, &sample_normal, &sample_depth);
 
-    // Path trace and accumulate
-    color += path_trace(ray_origin, ray_dir, &rng_state);
+    if (s == 0u) {
+      primary_normal = sample_normal;
+      primary_depth = sample_depth;
+    }
   }
 
   // Average samples
   color /= f32(samples_per_pixel);
 
   // Clamp to prevent fireflies
-  color = clamp(color, vec3f(0.0), vec3f(10.0));
+  color = clamp(color, vec3f(0.0), vec3f(5.0));
 
   // Write G-buffer
   textureStore(output_normal, global_id.xy, vec4f(primary_normal, 1.0));

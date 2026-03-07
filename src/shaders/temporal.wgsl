@@ -169,32 +169,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
     }
   }
 
-  // Blend factor - use what's passed in (already computed on CPU based on static/moving)
+  // Simple 1-frame blend: 50/50 current + previous, no accumulation
   var blend = select(1.0, params.blend_factor, valid_history);
 
-  var result: vec3f;
+  // Neighbourhood clamp history to reduce ghosting when moving
+  let bounds = get_neighbourhood_bounds(pixel_coord);
+  let min_col = bounds[0];
+  let max_col = bounds[1];
+  let bounds_expand = 0.25;
+  let range = max_col - min_col;
+  let clamped_history = clamp(history_col, min_col - range * bounds_expand, max_col + range * bounds_expand);
 
-  // When camera is static, skip neighbourhood clamping for proper convergence
-  if (params.static_frame_count > 0u) {
-    // Static camera - simple accumulation without clamping
-    result = mix(history_col, current_col, blend);
-  } else {
-    // Moving camera - use neighbourhood clamping to reduce ghosting
-    let bounds = get_neighbourhood_bounds(pixel_coord);
-    let min_col = bounds[0];
-    let max_col = bounds[1];
-
-    // Expand bounds slightly to allow some temporal variance
-    let bounds_expand = 0.25;
-    let range = max_col - min_col;
-    let clamped_history = clamp(history_col, min_col - range * bounds_expand, max_col + range * bounds_expand);
-
-    // Increase blend factor if history was significantly clamped
-    let clamp_amount = length(history_col - clamped_history);
-    blend = mix(blend, min(blend * 4.0, 0.5), saturate(clamp_amount * 2.0));
-
-    result = mix(clamped_history, current_col, blend);
-  }
+  let result = mix(clamped_history, current_col, blend);
 
   textureStore(output, pixel_coord, vec4f(result, 1.0));
 }
