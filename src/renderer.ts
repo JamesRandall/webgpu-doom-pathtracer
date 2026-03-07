@@ -92,6 +92,8 @@ export class Renderer {
   // Dynamic (non-BVH) triangles — e.g. monsters, items
   private dynamicTriangles: Triangle[] = [];
   private dynamicTriOffset: number = 0;
+  private dynamicAABBMin = { x: 0, y: 0, z: 0 };
+  private dynamicAABBMax = { x: 0, y: 0, z: 0 };
 
   constructor(
     device: GPUDevice,
@@ -232,7 +234,7 @@ export class Renderer {
 
     // Create camera uniform buffer
     this.cameraBuffer = this.device.createBuffer({
-      size: 64,
+      size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.updateCameraBuffer();
@@ -286,7 +288,7 @@ export class Renderer {
 
     // Create scene info buffer
     this.sceneInfoBuffer = this.device.createBuffer({
-      size: 64,
+      size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -844,7 +846,7 @@ export class Renderer {
   }
 
   private updateSceneInfoBuffer(): void {
-    const buffer = new ArrayBuffer(64);
+    const buffer = new ArrayBuffer(96);
     const u32View = new Uint32Array(buffer);
     const f32View = new Float32Array(buffer);
 
@@ -866,6 +868,16 @@ export class Renderer {
     u32View[13] = this.dynamicTriangles.length;
     u32View[14] = 0;
     u32View[15] = 0;
+
+    // Dynamic triangle AABB for early-out
+    f32View[16] = this.dynamicAABBMin.x;
+    f32View[17] = this.dynamicAABBMin.y;
+    f32View[18] = this.dynamicAABBMin.z;
+    f32View[19] = 0; // pad
+    f32View[20] = this.dynamicAABBMax.x;
+    f32View[21] = this.dynamicAABBMax.y;
+    f32View[22] = this.dynamicAABBMax.z;
+    f32View[23] = 0; // pad
 
     this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, buffer);
   }
@@ -980,6 +992,21 @@ export class Renderer {
     if (triangles.length > 0) {
       const data = packTriangles(triangles);
       this.device.queue.writeBuffer(this.triangleBuffer, this.dynamicTriOffset * 24 * 4, data.buffer);
+
+      // Compute AABB for early-out in shader
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (const tri of triangles) {
+        for (const v of [tri.v0, tri.v1, tri.v2]) {
+          minX = Math.min(minX, v.x); minY = Math.min(minY, v.y); minZ = Math.min(minZ, v.z);
+          maxX = Math.max(maxX, v.x); maxY = Math.max(maxY, v.y); maxZ = Math.max(maxZ, v.z);
+        }
+      }
+      this.dynamicAABBMin = { x: minX, y: minY, z: minZ };
+      this.dynamicAABBMax = { x: maxX, y: maxY, z: maxZ };
+    } else {
+      this.dynamicAABBMin = { x: 0, y: 0, z: 0 };
+      this.dynamicAABBMax = { x: 0, y: 0, z: 0 };
     }
   }
 

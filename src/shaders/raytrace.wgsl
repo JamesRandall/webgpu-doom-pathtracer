@@ -70,6 +70,10 @@ struct SceneInfo {
   dynamic_tri_count: u32,
   _pad0: u32,
   _pad1: u32,
+  dynamic_aabb_min: vec3f,
+  _pad2: f32,
+  dynamic_aabb_max: vec3f,
+  _pad3: f32,
 }
 
 struct HitInfo {
@@ -469,7 +473,7 @@ fn trace_bvh_accel(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
 }
 
 // Unified trace: BVH for static geometry, then brute-force dynamic triangles + player light sphere
-fn trace_scene(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
+fn trace_scene(ray_origin: vec3f, ray_dir: vec3f, bounce: u32) -> HitInfo {
   var hit: HitInfo;
   if (scene_info.node_count == 0u) {
     hit = trace_brute(ray_origin, ray_dir);
@@ -477,19 +481,21 @@ fn trace_scene(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
     hit = trace_bvh_accel(ray_origin, ray_dir);
   }
 
-  // Test dynamic (non-BVH) triangles
-  for (var i = 0u; i < scene_info.dynamic_tri_count; i++) {
-    let tri_idx = scene_info.dynamic_tri_offset + i;
-    let tri = triangles[tri_idx];
-    let hit_result = intersect_triangle_uv(ray_origin, ray_dir, tri.v0, tri.v1, tri.v2);
-    if (hit_result.t > 0.0 && hit_result.t < hit.t) {
-      hit.t = hit_result.t;
-      hit.normal = tri.normal;
-      hit.material_index = tri.material_index;
-      hit.hit = true;
-      hit.texture_index = tri.texture_index;
-      let w = 1.0 - hit_result.u - hit_result.v;
-      hit.uv = w * tri.uv0 + hit_result.u * tri.uv1 + hit_result.v * tri.uv2;
+  // Test dynamic (non-BVH) triangles — AABB early-out, first 2 bounces (visibility + shadow)
+  if (bounce < 2u && scene_info.dynamic_tri_count > 0u && intersect_aabb(ray_origin, 1.0 / ray_dir, scene_info.dynamic_aabb_min, scene_info.dynamic_aabb_max, hit.t)) {
+    for (var i = 0u; i < scene_info.dynamic_tri_count; i++) {
+      let tri_idx = scene_info.dynamic_tri_offset + i;
+      let tri = triangles[tri_idx];
+      let hit_result = intersect_triangle_uv(ray_origin, ray_dir, tri.v0, tri.v1, tri.v2);
+      if (hit_result.t > 0.0 && hit_result.t < hit.t) {
+        hit.t = hit_result.t;
+        hit.normal = tri.normal;
+        hit.material_index = tri.material_index;
+        hit.hit = true;
+        hit.texture_index = tri.texture_index;
+        let w = 1.0 - hit_result.u - hit_result.v;
+        hit.uv = w * tri.uv0 + hit_result.u * tri.uv1 + hit_result.v * tri.uv2;
+      }
     }
   }
 
@@ -536,7 +542,7 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
   var radiance = vec3f(0.0);
 
   for (var bounce = 0u; bounce < scene_info.max_bounces; bounce++) {
-    let hit = trace_scene(ray_origin, ray_dir);
+    let hit = trace_scene(ray_origin, ray_dir, bounce);
 
     if (!hit.hit) {
       // Miss - return background (dark for indoor scene)
