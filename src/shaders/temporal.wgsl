@@ -128,13 +128,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   let pixel = vec2f(global_id.xy) + 0.5;
 
   // Load current frame data
-  let current_col = textureLoad(current_color, pixel_coord, 0).rgb;
+  let current_data = textureLoad(current_color, pixel_coord, 0);
+  let current_col = current_data.rgb;
+  let current_variance = current_data.a;
   let depth = textureLoad(current_depth, pixel_coord, 0).r;
   let normal = textureLoad(current_normal, pixel_coord, 0).rgb;
 
   // If no hit (background), just output current colour
   if (depth > 1e20) {
-    textureStore(output, pixel_coord, vec4f(current_col, 1.0));
+    textureStore(output, pixel_coord, vec4f(current_col, current_variance));
     return;
   }
 
@@ -182,5 +184,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
 
   let result = mix(clamped_history, current_col, blend);
 
-  textureStore(output, pixel_coord, vec4f(result, 1.0));
+  // Pass through variance for denoise stage
+  textureStore(output, pixel_coord, vec4f(result, current_variance));
 }

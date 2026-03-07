@@ -27,7 +27,7 @@ export class Renderer {
   private walkablePositions: { x: number; z: number }[] | undefined;
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
-  public static RESOLUTION_SCALE = 1.0;
+  public static RESOLUTION_SCALE = 0.5;
   private frameCount: number = 0;
   private nodeCount: number = 0;
   private triangleCount: number = 0;
@@ -68,12 +68,13 @@ export class Renderer {
   private staticFrameCount: number = 0;
 
   // Denoise settings
-  private readonly DENOISE_PASSES = 2; // Step sizes: 1, 2, 4, 8, 16
+  public denoisePasses = 0; // 0 = off, 1-5 = number of passes
+  public denoiseMode: 'atrous' | 'median' | 'adaptive' = 'median'; // algorithm
 
   // Post-processing options (public for UI control)
   public temporalFrames = 0;  // 0 = off, 1-5 = number of frames to blend
-  public enableSpatialDenoise = true;
-  public samplesPerPixel = 8;
+
+  public samplesPerPixel = 32;
   public maxBounces = 4;
 
   // Player light (emissive sphere at camera position)
@@ -1118,8 +1119,7 @@ export class Renderer {
       : this.outputTexture;
 
     // 3. À-trous wavelet denoise passes (optional)
-    const skipDenoise = !this.enableSpatialDenoise;
-    const numDenoisePasses = skipDenoise ? 0 : this.DENOISE_PASSES;
+    const numDenoisePasses = this.denoisePasses;
 
     // If denoise is enabled but temporal is disabled, copy output to temporalOutput
     // so the denoise bind groups work correctly
@@ -1139,9 +1139,10 @@ export class Renderer {
         const paramsUint = new Uint32Array(paramsData);
         const paramsFloat = new Float32Array(paramsData);
         paramsUint[0] = stepSize;
-        paramsFloat[1] = 4.0;   // sigma_color
-        paramsFloat[2] = 128.0; // sigma_normal
-        paramsFloat[3] = 1.0;   // sigma_depth
+        const modeMap = { atrous: 0, median: 1, adaptive: 2 } as const;
+        paramsFloat[1] = this.denoiseMode === 'atrous' ? 4.0 : 1.5;
+        paramsFloat[2] = 128.0;
+        paramsUint[3] = modeMap[this.denoiseMode];
         this.device.queue.writeBuffer(this.denoiseParamsBuffer, 0, paramsData);
 
         const denoisePass = commandEncoder.beginComputePass();

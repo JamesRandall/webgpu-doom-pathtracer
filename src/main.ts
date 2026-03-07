@@ -196,7 +196,10 @@ async function main() {
   const resolutionSelect = document.getElementById('resolution') as HTMLSelectElement;
   const temporalSlider = document.getElementById('temporal') as HTMLInputElement;
   const temporalValue = document.getElementById('temporal-value') as HTMLSpanElement;
-  const denoiseCheckbox = document.getElementById('denoise') as HTMLInputElement;
+  const denoiseSlider = document.getElementById('denoise') as HTMLInputElement;
+  const denoiseValue = document.getElementById('denoise-value') as HTMLSpanElement;
+  const denoiseModeSelect = document.getElementById('denoise-mode') as HTMLSelectElement;
+  const denoisePassesLabel = document.getElementById('denoise-passes-label') as HTMLLabelElement;
   const playerLightSlider = document.getElementById('player-light') as HTMLInputElement;
   const playerLightValue = document.getElementById('player-light-value') as HTMLSpanElement;
   const playerLightLabel = document.getElementById('player-light-label') as HTMLLabelElement;
@@ -218,7 +221,16 @@ async function main() {
   resolutionSelect.value = String(Renderer.RESOLUTION_SCALE);
   temporalSlider.value = String(renderer.temporalFrames);
   temporalValue.textContent = String(renderer.temporalFrames);
-  denoiseCheckbox.checked = renderer.enableSpatialDenoise;
+  // Denoise: sync UI with renderer defaults
+  if (renderer.denoisePasses === 0) {
+    denoiseModeSelect.value = 'off';
+    denoisePassesLabel.style.display = 'none';
+  } else {
+    denoiseModeSelect.value = renderer.denoiseMode;
+    denoiseSlider.value = String(renderer.denoisePasses);
+    denoiseValue.textContent = String(renderer.denoisePasses);
+    denoisePassesLabel.style.display = '';
+  }
 
   // Samples per pixel: 1, 4, 8, 12, 16, ... 64
   samplesSlider.addEventListener('input', () => {
@@ -248,7 +260,7 @@ async function main() {
     renderer.samplesPerPixel = samplesToSlider(parseInt(samplesSlider.value));
     renderer.maxBounces = parseInt(bouncesSlider.value);
     renderer.temporalFrames = parseInt(temporalSlider.value);
-    renderer.enableSpatialDenoise = denoiseCheckbox.checked;
+    applyDenoise();
     const showDungeon = activeScene === 'dungeon' ? '' : 'none';
     playerLightLabel.style.display = showDungeon;
     playerFalloffLabel.style.display = showDungeon;
@@ -289,8 +301,21 @@ async function main() {
   });
 
   // Spatial denoise
-  denoiseCheckbox.addEventListener('change', () => {
-    renderer.enableSpatialDenoise = denoiseCheckbox.checked;
+  function applyDenoise() {
+    const mode = denoiseModeSelect.value;
+    if (mode === 'off') {
+      renderer.denoisePasses = 0;
+      denoisePassesLabel.style.display = 'none';
+    } else {
+      renderer.denoiseMode = mode as 'atrous' | 'median' | 'adaptive';
+      renderer.denoisePasses = parseInt(denoiseSlider.value);
+      denoisePassesLabel.style.display = '';
+    }
+  }
+  denoiseModeSelect.addEventListener('change', applyDenoise);
+  denoiseSlider.addEventListener('input', () => {
+    renderer.denoisePasses = parseInt(denoiseSlider.value);
+    denoiseValue.textContent = String(denoiseSlider.value);
   });
 
   // Player torch light intensity and size

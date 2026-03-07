@@ -685,6 +685,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   let samples_per_pixel = scene_info.samples_per_pixel;
 
   var color = vec3f(0.0);
+  var color_sq = vec3f(0.0);
   var primary_normal = vec3f(0.0);
   var primary_depth = 1e30;
 
@@ -700,7 +701,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
     // Path trace and accumulate (first sample also outputs G-buffer data)
     var sample_normal = vec3f(0.0);
     var sample_depth = 1e30;
-    color += path_trace(ray_origin, ray_dir, &rng_state, &sample_normal, &sample_depth);
+    let sample_color = path_trace(ray_origin, ray_dir, &rng_state, &sample_normal, &sample_depth);
+    // Clamp individual samples to prevent firefly variance
+    let clamped_sample = clamp(sample_color, vec3f(0.0), vec3f(5.0));
+    color += clamped_sample;
+    color_sq += clamped_sample * clamped_sample;
 
     if (s == 0u) {
       primary_normal = sample_normal;
@@ -709,15 +714,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   }
 
   // Average samples
-  color /= f32(samples_per_pixel);
+  let n = f32(samples_per_pixel);
+  color /= n;
 
-  // Clamp to prevent fireflies
-  color = clamp(color, vec3f(0.0), vec3f(5.0));
+  // Per-pixel luminance variance (for variance-guided denoising)
+  let variance = max(color_sq / n - color * color, vec3f(0.0));
+  let lum_variance = dot(variance, vec3f(0.299, 0.587, 0.114));
 
   // Write G-buffer
   textureStore(output_normal, global_id.xy, vec4f(primary_normal, 1.0));
   textureStore(output_depth, global_id.xy, vec4f(primary_depth, 0.0, 0.0, 0.0));
 
-  // Output averaged sample
-  textureStore(output, global_id.xy, vec4f(color, 1.0));
+  // Output averaged sample with variance in alpha
+  textureStore(output, global_id.xy, vec4f(color, lum_variance));
 }

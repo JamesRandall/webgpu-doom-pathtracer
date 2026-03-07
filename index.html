@@ -112,8 +112,8 @@
       </div>
       <label>
         <span>Samples/pixel</span>
-        <input type="range" id="samples" min="0" max="16" value="2">
-        <span class="value" id="samples-value">8</span>
+        <input type="range" id="samples" min="0" max="16" value="8">
+        <span class="value" id="samples-value">32</span>
       </label>
       <label>
         <span>Max bounces</span>
@@ -124,9 +124,9 @@
         <span>Resolution</span>
         <select id="resolution">
           <option value="0.25">0.25x</option>
-          <option value="0.5">0.5x</option>
+          <option value="0.5" selected>0.5x</option>
           <option value="0.75">0.75x</option>
-          <option value="1.0" selected>1.0x</option>
+          <option value="1.0">1.0x</option>
           <option value="2.0">2.0x</option>
         </select>
       </label>
@@ -137,7 +137,17 @@
       </label>
       <label>
         <span>Denoise</span>
-        <input type="checkbox" id="denoise" checked>
+        <select id="denoise-mode">
+          <option value="off" selected>Off</option>
+          <option value="median">Median</option>
+          <option value="adaptive">Adaptive</option>
+          <option value="atrous">À-trous</option>
+        </select>
+      </label>
+      <label id="denoise-passes-label" style="display: none;">
+        <span>Denoise passes</span>
+        <input type="range" id="denoise" min="1" max="5" value="2" step="1">
+        <span class="value" id="denoise-value">2</span>
       </label>
       <label id="player-light-label" style="display: none;">
         <span>Player torch</span>
