@@ -17,13 +17,16 @@ struct Camera {
   _pad3: f32,
 }
 
-struct Triangle {
+struct TriangleVerts {
   v0: vec3f,
   _pad0: f32,
   v1: vec3f,
   _pad1: f32,
   v2: vec3f,
   _pad2: f32,
+}
+
+struct TriangleAttribs {
   normal: vec3f,
   material_index: u32,
   uv0: vec2f,
@@ -78,16 +81,26 @@ struct SceneInfo {
 
 struct HitInfo {
   t: f32,
+  tri_index: u32,
+  bary_u: f32,
+  bary_v: f32,
+  hit: bool,
+  is_player_light: bool,
+}
+
+struct ResolvedHit {
+  t: f32,
   normal: vec3f,
   material_index: u32,
-  hit: bool,
   uv: vec2f,
   texture_index: i32,
+  hit: bool,
+  is_player_light: bool,
 }
 
 @group(0) @binding(0) var output: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(1) var<uniform> camera: Camera;
-@group(0) @binding(2) var<storage, read> triangles: array<Triangle>;
+@group(0) @binding(2) var<storage, read> tri_verts: array<TriangleVerts>;
 @group(0) @binding(3) var<storage, read> materials: array<Material>;
 @group(0) @binding(4) var<storage, read> bvh_nodes: array<BVHNode>;
 @group(0) @binding(5) var<uniform> scene_info: SceneInfo;
@@ -96,6 +109,7 @@ struct HitInfo {
 @group(0) @binding(8) var texture_atlas: texture_2d<f32>;
 @group(0) @binding(9) var atlas_sampler: sampler;
 @group(0) @binding(10) var<storage, read> atlas_entries: array<AtlasEntry>;
+@group(0) @binding(11) var<storage, read> tri_attribs: array<TriangleAttribs>;
 
 const MAX_STACK_SIZE = 32u;
 const LEAF_FLAG = 0x80000000u;
@@ -359,40 +373,66 @@ fn intersect_sphere(ray_origin: vec3f, ray_dir: vec3f, center: vec3f, radius: f3
   return t;
 }
 
+// Resolve attributes from closest hit (cold data lookup, done once per ray)
+fn resolve_hit(hit: HitInfo) -> ResolvedHit {
+  var r: ResolvedHit;
+  r.t = hit.t;
+  r.hit = hit.hit;
+  r.is_player_light = hit.is_player_light;
+
+  if (!hit.hit || hit.is_player_light) {
+    r.material_index = 0u;
+    r.uv = vec2f(0.0, 0.0);
+    r.texture_index = -1;
+    r.normal = vec3f(0.0);
+    return r;
+  }
+
+  let attrib = tri_attribs[hit.tri_index];
+  r.normal = attrib.normal;
+  r.material_index = attrib.material_index;
+  r.texture_index = attrib.texture_index;
+
+  let w = 1.0 - hit.bary_u - hit.bary_v;
+  r.uv = w * attrib.uv0 + hit.bary_u * attrib.uv1 + hit.bary_v * attrib.uv2;
+
+  return r;
+}
+
 // Brute-force trace all triangles (no BVH)
 fn trace_brute(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   var closest_hit: HitInfo;
   closest_hit.t = 1e30;
   closest_hit.hit = false;
-  closest_hit.material_index = 0u;
-  closest_hit.uv = vec2f(0.0, 0.0);
-  closest_hit.texture_index = -1;
+  closest_hit.is_player_light = false;
+  closest_hit.tri_index = 0u;
+  closest_hit.bary_u = 0.0;
+  closest_hit.bary_v = 0.0;
 
   for (var i = 0u; i < scene_info.triangle_count; i++) {
-    let tri = triangles[i];
-    let hit_result = intersect_triangle_uv(ray_origin, ray_dir, tri.v0, tri.v1, tri.v2);
+    let verts = tri_verts[i];
+    let hit_result = intersect_triangle_uv(ray_origin, ray_dir, verts.v0, verts.v1, verts.v2);
     if (hit_result.t > 0.0 && hit_result.t < closest_hit.t) {
       closest_hit.t = hit_result.t;
-      closest_hit.normal = tri.normal;
-      closest_hit.material_index = tri.material_index;
+      closest_hit.tri_index = i;
+      closest_hit.bary_u = hit_result.u;
+      closest_hit.bary_v = hit_result.v;
       closest_hit.hit = true;
-      closest_hit.texture_index = tri.texture_index;
-      let w = 1.0 - hit_result.u - hit_result.v;
-      closest_hit.uv = w * tri.uv0 + hit_result.u * tri.uv1 + hit_result.v * tri.uv2;
     }
   }
 
   return closest_hit;
 }
 
-// Trace ray using BVH with ordered traversal
+// Trace ray using BVH with ordered traversal (reads only verts — hot data)
 fn trace_bvh_accel(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   var closest_hit: HitInfo;
   closest_hit.t = 1e30;
   closest_hit.hit = false;
-  closest_hit.material_index = 0u;
-  closest_hit.uv = vec2f(0.0, 0.0);
-  closest_hit.texture_index = -1;
+  closest_hit.is_player_light = false;
+  closest_hit.tri_index = 0u;
+  closest_hit.bary_u = 0.0;
+  closest_hit.bary_v = 0.0;
 
   let ray_dir_inv = 1.0 / ray_dir;
 
@@ -417,19 +457,15 @@ fn trace_bvh_accel(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
 
       for (var i = 0u; i < tri_count; i++) {
         let tri_idx = first_tri + i;
-        let tri = triangles[tri_idx];
-        let hit_result = intersect_triangle_uv(ray_origin, ray_dir, tri.v0, tri.v1, tri.v2);
+        let verts = tri_verts[tri_idx];
+        let hit_result = intersect_triangle_uv(ray_origin, ray_dir, verts.v0, verts.v1, verts.v2);
 
         if (hit_result.t > 0.0 && hit_result.t < closest_hit.t) {
           closest_hit.t = hit_result.t;
-          closest_hit.normal = tri.normal;
-          closest_hit.material_index = tri.material_index;
+          closest_hit.tri_index = tri_idx;
+          closest_hit.bary_u = hit_result.u;
+          closest_hit.bary_v = hit_result.v;
           closest_hit.hit = true;
-          closest_hit.texture_index = tri.texture_index;
-
-          // Interpolate UV using barycentric coordinates
-          let w = 1.0 - hit_result.u - hit_result.v;
-          closest_hit.uv = w * tri.uv0 + hit_result.u * tri.uv1 + hit_result.v * tri.uv2;
         }
       }
     } else {
@@ -485,16 +521,14 @@ fn trace_scene(ray_origin: vec3f, ray_dir: vec3f, bounce: u32) -> HitInfo {
   if (bounce < 2u && scene_info.dynamic_tri_count > 0u && intersect_aabb(ray_origin, 1.0 / ray_dir, scene_info.dynamic_aabb_min, scene_info.dynamic_aabb_max, hit.t)) {
     for (var i = 0u; i < scene_info.dynamic_tri_count; i++) {
       let tri_idx = scene_info.dynamic_tri_offset + i;
-      let tri = triangles[tri_idx];
-      let hit_result = intersect_triangle_uv(ray_origin, ray_dir, tri.v0, tri.v1, tri.v2);
+      let verts = tri_verts[tri_idx];
+      let hit_result = intersect_triangle_uv(ray_origin, ray_dir, verts.v0, verts.v1, verts.v2);
       if (hit_result.t > 0.0 && hit_result.t < hit.t) {
         hit.t = hit_result.t;
-        hit.normal = tri.normal;
-        hit.material_index = tri.material_index;
+        hit.tri_index = tri_idx;
+        hit.bary_u = hit_result.u;
+        hit.bary_v = hit_result.v;
         hit.hit = true;
-        hit.texture_index = tri.texture_index;
-        let w = 1.0 - hit_result.u - hit_result.v;
-        hit.uv = w * tri.uv0 + hit_result.u * tri.uv1 + hit_result.v * tri.uv2;
       }
     }
   }
@@ -505,12 +539,8 @@ fn trace_scene(ray_origin: vec3f, ray_dir: vec3f, bounce: u32) -> HitInfo {
     let sphere_t = intersect_sphere(ray_origin, ray_dir, camera.position, scene_info.player_light_radius);
     if (sphere_t > 0.0 && sphere_t < hit.t) {
       hit.t = sphere_t;
-      let hit_pos = ray_origin + ray_dir * sphere_t;
-      hit.normal = normalize(hit_pos - camera.position);
-      hit.material_index = 0u;
       hit.hit = true;
-      hit.texture_index = -2; // sentinel for player light sphere
-      hit.uv = vec2f(0.0, 0.0);
+      hit.is_player_light = true;
     }
   }
 
@@ -542,25 +572,33 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
   var radiance = vec3f(0.0);
 
   for (var bounce = 0u; bounce < scene_info.max_bounces; bounce++) {
-    let hit = trace_scene(ray_origin, ray_dir, bounce);
+    let raw_hit = trace_scene(ray_origin, ray_dir, bounce);
 
-    if (!hit.hit) {
+    if (!raw_hit.hit) {
       // Miss - return background (dark for indoor scene)
       break;
     }
 
+    // Resolve attributes from cold buffer (once per bounce, only for closest hit)
+    let hit = resolve_hit(raw_hit);
+
     // Output primary hit info for G-buffer on first bounce
     if (bounce == 0u) {
-      var pn = hit.normal;
-      if (dot(ray_dir, pn) > 0.0) {
-        pn = -pn;
+      if (hit.is_player_light) {
+        let sphere_hit_pos = ray_origin + ray_dir * hit.t;
+        *out_normal = normalize(sphere_hit_pos - camera.position);
+      } else {
+        var pn = hit.normal;
+        if (dot(ray_dir, pn) > 0.0) {
+          pn = -pn;
+        }
+        *out_normal = pn;
       }
-      *out_normal = pn;
       *out_depth = hit.t;
     }
 
     // Player light sphere hit — treat as emissive and stop
-    if (hit.texture_index == -2) {
+    if (hit.is_player_light) {
       radiance += throughput * scene_info.player_light_color;
       break;
     }
@@ -581,8 +619,11 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       surface_color = mat.albedo;
     }
 
-    // Add emissive contribution
+    // Handle emissive surfaces
     radiance += throughput * mat.emissive;
+    if (mat.material_type == MATERIAL_EMISSIVE) {
+      break;
+    }
 
     // Calculate hit position
     let hit_pos = ray_origin + ray_dir * hit.t;
@@ -594,10 +635,7 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
     }
 
     // Handle different material types
-    if (mat.material_type == MATERIAL_EMISSIVE) {
-      // Pure emissive surface - stop tracing
-      break;
-    } else if (mat.material_type == MATERIAL_SPECULAR) {
+    if (mat.material_type == MATERIAL_SPECULAR) {
       // Specular/metallic material with GGX microfacet model
       let roughness = max(mat.roughness, 0.001);  // Clamp to avoid singularities
 
@@ -644,7 +682,6 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       ray_origin = hit_pos + normal * 0.001;
     } else {
       // Diffuse material (MATERIAL_DIFFUSE)
-      // Update throughput with textured surface color
       throughput *= surface_color;
 
       ray_origin = hit_pos + normal * 0.001;
@@ -653,9 +690,6 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       let r1 = pcg(rng_state);
       let r2 = pcg(rng_state);
       ray_dir = cosine_hemisphere(normal, r1, r2);
-
-      // For cosine-weighted sampling, the PDF cancels with the cosine term in rendering equation
-      // So we don't need to explicitly multiply by cos(theta) / PDF
     }
 
     // Russian roulette for path termination (after a few bounces)

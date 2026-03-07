@@ -38,6 +38,42 @@ fn denoise_atrous(center_coord: vec2i, dims: vec2u) -> vec4f {
     return center_data;
   }
 
+  // --- Compute spatial variance from 3x3 immediate neighbourhood ---
+  // Provides a noise estimate that works even at 1 spp where per-pixel variance is zero.
+  var local_sum = vec3f(0.0);
+  var local_sum_sq = vec3f(0.0);
+  var local_count = 0.0;
+
+  for (var sy = -1; sy <= 1; sy++) {
+    for (var sx = -1; sx <= 1; sx++) {
+      let local_coord = clamp(center_coord + vec2i(sx, sy), vec2i(0), vec2i(dims) - 1);
+      let local_col = textureLoad(input_color, local_coord, 0).rgb;
+
+      // Only include geometrically similar neighbours
+      let local_normal = textureLoad(input_normal, local_coord, 0).rgb;
+      let local_depth = textureLoad(input_depth, local_coord, 0).r;
+      let n_sim = dot(center_normal, local_normal);
+      let d_diff = abs(center_depth - local_depth) / max(center_depth, 0.001);
+
+      if (n_sim > 0.9 && d_diff < 0.1) {
+        local_sum += local_col;
+        local_sum_sq += local_col * local_col;
+        local_count += 1.0;
+      }
+    }
+  }
+
+  var spatial_variance = 0.0;
+  if (local_count > 1.0) {
+    let local_mean = local_sum / local_count;
+    let local_var = max(local_sum_sq / local_count - local_mean * local_mean, vec3f(0.0));
+    spatial_variance = dot(local_var, vec3f(0.299, 0.587, 0.114));
+  }
+
+  // Use the larger of path tracer variance and spatial variance
+  let effective_variance = max(center_variance, spatial_variance);
+
+  // --- Main à-trous filter loop ---
   var sum_color = vec3f(0.0);
   var sum_variance = 0.0;
   var sum_weight = 0.0;
@@ -59,13 +95,16 @@ fn denoise_atrous(center_coord: vec2i, dims: vec2u) -> vec4f {
       let normal_dot = max(0.0, dot(center_normal, sample_normal));
       let normal_weight = pow(normal_dot, 128.0);
 
-      // Depth similarity
-      let depth_diff = abs(center_depth - sample_depth);
-      let depth_weight = exp(-depth_diff * 1.0);
+      // Depth similarity (relative to distance — far surfaces get more tolerance)
+      let relative_depth_diff = abs(center_depth - sample_depth) / max(center_depth, 0.001);
+      let depth_weight = exp(-relative_depth_diff * relative_depth_diff * 100.0);
 
-      // Color similarity
+      // Variance-guided color similarity
+      let noise_estimate = sqrt(max(effective_variance, 0.0));
+      //let adaptive_sigma = max(noise_estimate * params.sigma_color, 0.0001);
+      let adaptive_sigma = clamp(noise_estimate * params.sigma_color, 0.01, 0.5);
       let color_diff = length(center_color - sample_color);
-      let color_weight = exp(-color_diff * color_diff * params.sigma_color);
+      let color_weight = 1.0; //exp(-color_diff * color_diff / (2.0 * adaptive_sigma * adaptive_sigma));
 
       let weight = spatial_weight * normal_weight * depth_weight * color_weight;
       sum_color += sample_color * weight;
@@ -75,7 +114,9 @@ fn denoise_atrous(center_coord: vec2i, dims: vec2u) -> vec4f {
   }
 
   if (sum_weight > 0.0001) {
-    return vec4f(sum_color / sum_weight, sum_variance / sum_weight);
+    let filtered_variance = sum_variance / sum_weight;
+    let output_variance = max(filtered_variance, spatial_variance * 0.5);
+    return vec4f(sum_color / sum_weight, output_variance);
   }
   return center_data;
 }

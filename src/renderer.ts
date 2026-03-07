@@ -1,7 +1,7 @@
 import raytraceShaderCode from './shaders/raytrace.wgsl?raw';
 import denoiseShaderCode from './shaders/denoise.wgsl?raw';
 import temporalShaderCode from './shaders/temporal.wgsl?raw';
-import { Triangle, Material, packTriangles, packMaterials } from './scene/geometry';
+import { Triangle, Material, packTriangles, packMaterials, packTriangleVerts, packTriangleAttribs } from './scene/geometry';
 import { BVHBuilder, flattenBVH, packBVHNodes } from './bvh/builder';
 import { TextureAtlas, AtlasEntry } from './doom/textures';
 
@@ -28,6 +28,7 @@ export class Renderer {
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
   public static RESOLUTION_SCALE = 0.5;
+  private static readonly MAX_DENOISE_PASSES = 5;
   private frameCount: number = 0;
   private nodeCount: number = 0;
   private triangleCount: number = 0;
@@ -49,13 +50,14 @@ export class Renderer {
   private renderBindGroup!: GPUBindGroup;
   private cameraBuffer!: GPUBuffer;
   private triangleBuffer!: GPUBuffer;
+  private triAttribsBuffer!: GPUBuffer;
   private materialBuffer!: GPUBuffer;
   private bvhBuffer!: GPUBuffer;
   private sceneInfoBuffer!: GPUBuffer;
   private temporalParamsBuffer!: GPUBuffer;
   private cameraMatricesBuffer!: GPUBuffer;
   private sampler!: GPUSampler;
-  private denoiseParamsBuffer!: GPUBuffer;
+  private denoiseParamsBuffers: GPUBuffer[] = [];
   private pingPongTexture!: GPUTexture;
   private atlasTexture!: GPUTexture;
   private atlasEntriesBuffer!: GPUBuffer;
@@ -68,13 +70,13 @@ export class Renderer {
   private staticFrameCount: number = 0;
 
   // Denoise settings
-  public denoisePasses = 0; // 0 = off, 1-5 = number of passes
-  public denoiseMode: 'atrous' | 'median' | 'adaptive' = 'median'; // algorithm
+  public denoisePasses = 3; // 0 = off, 1-5 = number of passes
+  public denoiseMode: 'atrous' | 'median' | 'adaptive' = 'atrous'; // algorithm
 
   // Post-processing options (public for UI control)
-  public temporalFrames = 0;  // 0 = off, 1-5 = number of frames to blend
+  public temporalFrames = 1;  // 0 = off, 1+ = enabled
 
-  public samplesPerPixel = 32;
+  public samplesPerPixel = 4;
   public maxBounces = 4;
 
   // Player light (emissive sphere at camera position)
@@ -87,7 +89,7 @@ export class Renderer {
   private allTriangles: Triangle[] = [];
 
   // Precomputed BVH per tile position
-  private precomputedBVHs: Map<string, { bvhData: ArrayBuffer; triData: Float32Array; nodeCount: number; triCount: number }> = new Map();
+  private precomputedBVHs: Map<string, { bvhData: ArrayBuffer; triVertsData: Float32Array; triAttribsData: Float32Array; nodeCount: number; triCount: number }> = new Map();
   private currentTileKey: string = '';
 
   // Dynamic (non-BVH) triangles — e.g. monsters, items
@@ -95,7 +97,6 @@ export class Renderer {
   private dynamicTriOffset: number = 0;
   private dynamicAABBMin = { x: 0, y: 0, z: 0 };
   private dynamicAABBMax = { x: 0, y: 0, z: 0 };
-
   constructor(
     device: GPUDevice,
     context: GPUCanvasContext,
@@ -243,30 +244,41 @@ export class Renderer {
     // Compute max buffer sizes across all precomputed BVHs (or use current data)
     // Add extra space for dynamic triangles (monsters, items, etc.)
     const dynamicTriReserve = 512; // max dynamic triangles
-    const bytesPerTri = 24 * 4; // 24 floats per packed triangle
-    let maxTriBytes = packTriangles(orderedTriangles).byteLength + dynamicTriReserve * bytesPerTri;
+    const bytesPerVert = 12 * 4; // 12 floats per TriangleVerts
+    const bytesPerAttrib = 12 * 4; // 12 floats per TriangleAttribs
+    let maxVertBytes = packTriangleVerts(orderedTriangles).byteLength + dynamicTriReserve * bytesPerVert;
+    let maxAttribBytes = packTriangleAttribs(orderedTriangles).byteLength + dynamicTriReserve * bytesPerAttrib;
     let maxBvhBytes = bvhData.byteLength;
     if (this.precomputedBVHs.size > 0) {
       for (const entry of this.precomputedBVHs.values()) {
-        maxTriBytes = Math.max(maxTriBytes, entry.triData.byteLength + dynamicTriReserve * bytesPerTri);
+        maxVertBytes = Math.max(maxVertBytes, entry.triVertsData.byteLength + dynamicTriReserve * bytesPerVert);
+        maxAttribBytes = Math.max(maxAttribBytes, entry.triAttribsData.byteLength + dynamicTriReserve * bytesPerAttrib);
         maxBvhBytes = Math.max(maxBvhBytes, entry.bvhData.byteLength);
       }
     }
 
-    // Create triangle storage buffer — sized for largest precomputed set
+    // Create triangle verts storage buffer (hot data — traversal)
     this.triangleBuffer = this.device.createBuffer({
-      size: Math.max(maxTriBytes, 32),
+      size: Math.max(maxVertBytes, 32),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    // Create triangle attribs storage buffer (cold data — closest hit only)
+    this.triAttribsBuffer = this.device.createBuffer({
+      size: Math.max(maxAttribBytes, 32),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     // Upload initial data
     if (this.precomputedBVHs.size > 0) {
       const first = this.precomputedBVHs.get(this.currentTileKey)!;
-      this.device.queue.writeBuffer(this.triangleBuffer, 0, first.triData.buffer);
+      this.device.queue.writeBuffer(this.triangleBuffer, 0, first.triVertsData.buffer);
+      this.device.queue.writeBuffer(this.triAttribsBuffer, 0, first.triAttribsData.buffer);
       this.triangleCount = first.triCount;
       this.dynamicTriOffset = first.triCount;
     } else {
-      const triangleData = packTriangles(orderedTriangles);
-      this.device.queue.writeBuffer(this.triangleBuffer, 0, triangleData.buffer);
+      const vertsData = packTriangleVerts(orderedTriangles);
+      const attribsData = packTriangleAttribs(orderedTriangles);
+      this.device.queue.writeBuffer(this.triangleBuffer, 0, vertsData.buffer);
+      this.device.queue.writeBuffer(this.triAttribsBuffer, 0, attribsData.buffer);
       this.triangleCount = orderedTriangles.length;
       this.dynamicTriOffset = orderedTriangles.length;
     }
@@ -436,6 +448,11 @@ export class Renderer {
           visibility: GPUShaderStage.COMPUTE,
           buffer: { type: 'read-only-storage' },
         },
+        {
+          binding: 11,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage' },
+        },
       ],
     });
 
@@ -497,6 +514,10 @@ export class Renderer {
           binding: 10,
           resource: { buffer: this.atlasEntriesBuffer },
         },
+        {
+          binding: 11,
+          resource: { buffer: this.triAttribsBuffer },
+        },
       ],
     });
 
@@ -549,12 +570,6 @@ export class Renderer {
       ],
     });
 
-    // Create denoise params buffer
-    this.denoiseParamsBuffer = this.device.createBuffer({
-      size: 16, // step_size (u32) + sigma_color (f32) + sigma_normal (f32) + sigma_depth (f32)
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
     // Create denoise shader module
     const denoiseShaderModule = this.device.createShaderModule({
       code: denoiseShaderCode,
@@ -605,45 +620,56 @@ export class Renderer {
       },
     });
 
-    // Create denoise bind groups for ping-pong (temporalOutput -> pingPong, pingPong -> denoised)
-    // We need 2 * DENOISE_PASSES bind groups for alternating input/output
+    // Create per-pass denoise params buffers with pre-baked step sizes
+    this.denoiseParamsBuffers = [];
     this.denoiseBindGroups = [];
 
-    // First pass: temporalOutput -> pingPong
-    this.denoiseBindGroups.push(this.device.createBindGroup({
-      layout: denoiseBindGroupLayout,
-      entries: [
-        { binding: 0, resource: this.temporalOutputTexture.createView() },
-        { binding: 1, resource: this.normalTexture.createView() },
-        { binding: 2, resource: this.depthTexture.createView() },
-        { binding: 3, resource: this.pingPongTexture.createView() },
-        { binding: 4, resource: { buffer: this.denoiseParamsBuffer } },
-      ],
-    }));
+    for (let i = 0; i < Renderer.MAX_DENOISE_PASSES; i++) {
+      const buffer = this.device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
 
-    // Even passes: pingPong -> denoised
-    this.denoiseBindGroups.push(this.device.createBindGroup({
-      layout: denoiseBindGroupLayout,
-      entries: [
-        { binding: 0, resource: this.pingPongTexture.createView() },
-        { binding: 1, resource: this.normalTexture.createView() },
-        { binding: 2, resource: this.depthTexture.createView() },
-        { binding: 3, resource: this.denoisedTexture.createView() },
-        { binding: 4, resource: { buffer: this.denoiseParamsBuffer } },
-      ],
-    }));
+      const stepSize = 1 << i;
+      const paramsData = new ArrayBuffer(16);
+      const paramsUint = new Uint32Array(paramsData);
+      const paramsFloat = new Float32Array(paramsData);
+      paramsUint[0] = stepSize;
+      paramsFloat[1] = 4.0;
+      paramsFloat[2] = 128.0;
+      paramsUint[3] = 0;
+      this.device.queue.writeBuffer(buffer, 0, paramsData);
 
-    // Odd passes: denoised -> pingPong
-    this.denoiseBindGroups.push(this.device.createBindGroup({
-      layout: denoiseBindGroupLayout,
-      entries: [
-        { binding: 0, resource: this.denoisedTexture.createView() },
-        { binding: 1, resource: this.normalTexture.createView() },
-        { binding: 2, resource: this.depthTexture.createView() },
-        { binding: 3, resource: this.pingPongTexture.createView() },
-        { binding: 4, resource: { buffer: this.denoiseParamsBuffer } },
-      ],
-    }));
+      this.denoiseParamsBuffers.push(buffer);
+    }
+
+    // Create per-pass bind groups with correct ping-pong textures
+    for (let i = 0; i < Renderer.MAX_DENOISE_PASSES; i++) {
+      let inputTexture: GPUTexture;
+      let outputTexture: GPUTexture;
+
+      if (i === 0) {
+        inputTexture = this.temporalOutputTexture;
+        outputTexture = this.pingPongTexture;
+      } else if (i % 2 === 1) {
+        inputTexture = this.pingPongTexture;
+        outputTexture = this.denoisedTexture;
+      } else {
+        inputTexture = this.denoisedTexture;
+        outputTexture = this.pingPongTexture;
+      }
+
+      this.denoiseBindGroups.push(this.device.createBindGroup({
+        layout: denoiseBindGroupLayout,
+        entries: [
+          { binding: 0, resource: inputTexture.createView() },
+          { binding: 1, resource: this.normalTexture.createView() },
+          { binding: 2, resource: this.depthTexture.createView() },
+          { binding: 3, resource: outputTexture.createView() },
+          { binding: 4, resource: { buffer: this.denoiseParamsBuffers[i] } },
+        ],
+      }));
+    }
 
     // Create sampler for blit
     this.sampler = this.device.createSampler({
@@ -790,12 +816,14 @@ export class Renderer {
       const { nodes, orderedTriangles } = builder.build(culled);
       const flat = flattenBVH(nodes);
       const bvhData = packBVHNodes(flat);
-      const triData = packTriangles(orderedTriangles);
+      const triVertsData = packTriangleVerts(orderedTriangles);
+      const triAttribsData = packTriangleAttribs(orderedTriangles);
 
       const key = `${pos.x},${pos.z}`;
       this.precomputedBVHs.set(key, {
         bvhData,
-        triData,
+        triVertsData,
+        triAttribsData,
         nodeCount: nodes.length,
         triCount: orderedTriangles.length,
       });
@@ -832,9 +860,10 @@ export class Renderer {
     const entry = this.precomputedBVHs.get(bestKey);
     if (!entry) return;
 
-    // Upload this tile's BVH and triangles
+    // Upload this tile's BVH and triangles (verts + attribs)
     this.device.queue.writeBuffer(this.bvhBuffer, 0, entry.bvhData);
-    this.device.queue.writeBuffer(this.triangleBuffer, 0, entry.triData.buffer);
+    this.device.queue.writeBuffer(this.triangleBuffer, 0, entry.triVertsData.buffer);
+    this.device.queue.writeBuffer(this.triAttribsBuffer, 0, entry.triAttribsData.buffer);
     this.nodeCount = entry.nodeCount;
     this.triangleCount = entry.triCount;
     this.dynamicTriOffset = entry.triCount;
@@ -990,11 +1019,11 @@ export class Renderer {
 
   setDynamicTriangles(triangles: Triangle[]): void {
     this.dynamicTriangles = triangles;
-    // Dynamic objects moved — invalidate temporal accumulation
-    this.staticFrameCount = 0;
     if (triangles.length > 0) {
-      const data = packTriangles(triangles);
-      this.device.queue.writeBuffer(this.triangleBuffer, this.dynamicTriOffset * 24 * 4, data.buffer);
+      const vertsData = packTriangleVerts(triangles);
+      const attribsData = packTriangleAttribs(triangles);
+      this.device.queue.writeBuffer(this.triangleBuffer, this.dynamicTriOffset * 12 * 4, vertsData.buffer);
+      this.device.queue.writeBuffer(this.triAttribsBuffer, this.dynamicTriOffset * 12 * 4, attribsData.buffer);
 
       // Compute AABB for early-out in shader
       let minX = Infinity, minY = Infinity, minZ = Infinity;
@@ -1115,51 +1144,45 @@ export class Renderer {
       ? this.temporalOutputTexture
       : this.outputTexture;
 
-    // 3. À-trous wavelet denoise passes (optional)
+    // 3. Denoise passes (optional)
     const numDenoisePasses = this.denoisePasses;
 
-    // If denoise is enabled but temporal is disabled, copy output to temporalOutput
-    // so the denoise bind groups work correctly
-    if (numDenoisePasses > 0 && !(this.temporalFrames > 0)) {
-      commandEncoder.copyTextureToTexture(
-        { texture: this.outputTexture },
-        { texture: this.temporalOutputTexture },
-        { width: this.renderWidth, height: this.renderHeight }
-      );
-    }
-
     if (numDenoisePasses > 0) {
-      for (let i = 0; i < numDenoisePasses; i++) {
-        const stepSize = 1 << i;
+      // Update mode and sigma_color on all active params buffers
+      const modeMap = { atrous: 0, median: 1, adaptive: 2 } as const;
+      const mode = modeMap[this.denoiseMode];
+      const sigmaColor = this.denoiseMode === 'atrous' ? 1.0 : 1.5;
 
+      for (let i = 0; i < numDenoisePasses; i++) {
         const paramsData = new ArrayBuffer(16);
         const paramsUint = new Uint32Array(paramsData);
         const paramsFloat = new Float32Array(paramsData);
-        paramsUint[0] = stepSize;
-        const modeMap = { atrous: 0, median: 1, adaptive: 2 } as const;
-        paramsFloat[1] = this.denoiseMode === 'atrous' ? 4.0 : 1.5;
+        paramsUint[0] = 1 << i;
+        paramsFloat[1] = sigmaColor;
         paramsFloat[2] = 128.0;
-        paramsUint[3] = modeMap[this.denoiseMode];
-        this.device.queue.writeBuffer(this.denoiseParamsBuffer, 0, paramsData);
+        paramsUint[3] = mode;
+        this.device.queue.writeBuffer(this.denoiseParamsBuffers[i], 0, paramsData);
+      }
 
+      // If temporal is disabled, copy raw output to temporalOutputTexture
+      // so bind group 0 reads the correct input
+      if (!(this.temporalFrames > 0)) {
+        commandEncoder.copyTextureToTexture(
+          { texture: this.outputTexture },
+          { texture: this.temporalOutputTexture },
+          { width: this.renderWidth, height: this.renderHeight }
+        );
+      }
+
+      for (let i = 0; i < numDenoisePasses; i++) {
         const denoisePass = commandEncoder.beginComputePass();
         denoisePass.setPipeline(this.denoisePipeline);
-
-        let bindGroupIndex: number;
-        if (i === 0) {
-          bindGroupIndex = 0; // temporalOutput -> pingPong
-        } else if (i % 2 === 1) {
-          bindGroupIndex = 1; // pingPong -> denoised
-        } else {
-          bindGroupIndex = 2; // denoised -> pingPong
-        }
-
-        denoisePass.setBindGroup(0, this.denoiseBindGroups[bindGroupIndex]);
+        denoisePass.setBindGroup(0, this.denoiseBindGroups[i]);
         denoisePass.dispatchWorkgroups(dispatchX, dispatchY);
         denoisePass.end();
       }
 
-      // Copy result to denoised texture if odd number of passes
+      // If odd number of passes, final output is in pingPongTexture — copy to denoised
       if (numDenoisePasses % 2 === 1) {
         commandEncoder.copyTextureToTexture(
           { texture: this.pingPongTexture },

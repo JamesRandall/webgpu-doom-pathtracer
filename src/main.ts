@@ -213,10 +213,7 @@ async function main() {
   const phantomLabel = document.getElementById('phantom-label') as HTMLLabelElement;
 
   // Set initial values from renderer
-  // Samples slider: 0 = 1 sample, 1-16 = 4, 8, 12, ... 64 (increments of 4)
-  const sliderFromSamples = (s: number) => s === 1 ? 0 : s / 4;
-  const samplesToSlider = (v: number) => v === 0 ? 1 : v * 4;
-  samplesSlider.value = String(sliderFromSamples(renderer.samplesPerPixel));
+  samplesSlider.value = String(renderer.samplesPerPixel);
   samplesValue.textContent = String(renderer.samplesPerPixel);
   resolutionSelect.value = String(Renderer.RESOLUTION_SCALE);
   temporalSlider.value = String(renderer.temporalFrames);
@@ -232,9 +229,8 @@ async function main() {
     denoisePassesLabel.style.display = '';
   }
 
-  // Samples per pixel: 1, 4, 8, 12, 16, ... 64
   samplesSlider.addEventListener('input', () => {
-    const samples = samplesToSlider(parseInt(samplesSlider.value));
+    const samples = parseInt(samplesSlider.value);
     renderer.samplesPerPixel = samples;
     samplesValue.textContent = String(samples);
   });
@@ -257,7 +253,7 @@ async function main() {
       renderer.renderDistance = parseInt(renderDistSlider.value) * TILE_SIZE;
     }
     await renderer.initialize();
-    renderer.samplesPerPixel = samplesToSlider(parseInt(samplesSlider.value));
+    renderer.samplesPerPixel = parseInt(samplesSlider.value);
     renderer.maxBounces = parseInt(bouncesSlider.value);
     renderer.temporalFrames = parseInt(temporalSlider.value);
     applyDenoise();

@@ -193,17 +193,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
     }
   }
 
-  // --- Compute blend factor ---
+  // --- Compute blend factor (per-pixel confidence) ---
   var blend: f32;
   if (!valid_history) {
     // No usable history — use current frame only
     blend = 1.0;
   } else if (params.static_frame_count > 0u) {
-    // Static camera: true 1/N Monte Carlo accumulation
-    let accumulated = f32(params.static_frame_count + 1u);
-    blend = 1.0 / (accumulated + 1.0);
+    // Static camera — check if this pixel's content has changed
+    // (dynamic objects, moving shadows, animated lights)
+    let lum_current = dot(current_col, vec3f(0.299, 0.587, 0.114));
+    let lum_history = dot(history_col, vec3f(0.299, 0.587, 0.114));
+    let lum_diff = abs(lum_current - lum_history) / max(lum_history, 0.01);
+
+    if (lum_diff > 0.3) {
+      // Significant change — content changed, not just noise
+      blend = 0.15;
+    } else {
+      // Pixel is stable — full 1/N Monte Carlo accumulation
+      let accumulated = f32(params.static_frame_count + 1u);
+      blend = 1.0 / (accumulated + 1.0);
+    }
   } else {
-    // Moving camera: conservative fixed blend
+    // Camera is moving — conservative fixed blend
     blend = params.moving_blend_factor;
   }
 

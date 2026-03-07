@@ -350,7 +350,7 @@ function createBox(center: Vec3, width: number, depth: number, height: number, m
   return triangles;
 }
 
-// Pack triangles into a Float32Array for GPU upload
+// Pack triangles into a Float32Array for GPU upload (legacy, kept for compatibility)
 // Layout per triangle:
 //   v0(3) + pad(1) = 4 floats
 //   v1(3) + pad(1) = 4 floats
@@ -402,6 +402,47 @@ export function packTriangles(triangles: Triangle[]): Float32Array {
     data[offset + 21] = t.uv2.v;
     dataInt[offset + 22] = t.textureIndex;
     data[offset + 23] = 0; // padding
+  }
+
+  return data;
+}
+
+// Pack vertex positions only (hot data for BVH traversal)
+// Layout: v0(3)+pad, v1(3)+pad, v2(3)+pad = 12 floats = 48 bytes
+export function packTriangleVerts(triangles: Triangle[]): Float32Array {
+  const floatsPerTri = 12;
+  const data = new Float32Array(triangles.length * floatsPerTri);
+
+  for (let i = 0; i < triangles.length; i++) {
+    const t = triangles[i];
+    const o = i * floatsPerTri;
+    data[o + 0] = t.v0.x; data[o + 1] = t.v0.y; data[o + 2] = t.v0.z; data[o + 3] = 0;
+    data[o + 4] = t.v1.x; data[o + 5] = t.v1.y; data[o + 6] = t.v1.z; data[o + 7] = 0;
+    data[o + 8] = t.v2.x; data[o + 9] = t.v2.y; data[o + 10] = t.v2.z; data[o + 11] = 0;
+  }
+
+  return data;
+}
+
+// Pack attributes only (cold data, read once at closest hit)
+// Layout: normal(3)+materialIndex, uv0(2)+uv1(2), uv2(2)+textureIndex+pad = 12 floats = 48 bytes
+export function packTriangleAttribs(triangles: Triangle[]): Float32Array {
+  const floatsPerTri = 12;
+  const buffer = new ArrayBuffer(triangles.length * floatsPerTri * 4);
+  const data = new Float32Array(buffer);
+  const dataUint = new Uint32Array(buffer);
+  const dataInt = new Int32Array(buffer);
+
+  for (let i = 0; i < triangles.length; i++) {
+    const t = triangles[i];
+    const o = i * floatsPerTri;
+    data[o + 0] = t.normal.x; data[o + 1] = t.normal.y; data[o + 2] = t.normal.z;
+    dataUint[o + 3] = t.materialIndex;
+    data[o + 4] = t.uv0.u; data[o + 5] = t.uv0.v;
+    data[o + 6] = t.uv1.u; data[o + 7] = t.uv1.v;
+    data[o + 8] = t.uv2.u; data[o + 9] = t.uv2.v;
+    dataInt[o + 10] = t.textureIndex;
+    data[o + 11] = 0;
   }
 
   return data;
