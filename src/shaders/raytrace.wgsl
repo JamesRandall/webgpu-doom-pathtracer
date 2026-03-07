@@ -66,6 +66,10 @@ struct SceneInfo {
   player_light_falloff: f32,
   player_light_color: vec3f,
   player_light_radius: f32,
+  dynamic_tri_offset: u32,
+  dynamic_tri_count: u32,
+  _pad0: u32,
+  _pad1: u32,
 }
 
 struct HitInfo {
@@ -464,13 +468,29 @@ fn trace_bvh_accel(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   return closest_hit;
 }
 
-// Unified trace: pick brute force or BVH, then test player light sphere
+// Unified trace: BVH for static geometry, then brute-force dynamic triangles + player light sphere
 fn trace_scene(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   var hit: HitInfo;
   if (scene_info.node_count == 0u) {
     hit = trace_brute(ray_origin, ray_dir);
   } else {
     hit = trace_bvh_accel(ray_origin, ray_dir);
+  }
+
+  // Test dynamic (non-BVH) triangles
+  for (var i = 0u; i < scene_info.dynamic_tri_count; i++) {
+    let tri_idx = scene_info.dynamic_tri_offset + i;
+    let tri = triangles[tri_idx];
+    let hit_result = intersect_triangle_uv(ray_origin, ray_dir, tri.v0, tri.v1, tri.v2);
+    if (hit_result.t > 0.0 && hit_result.t < hit.t) {
+      hit.t = hit_result.t;
+      hit.normal = tri.normal;
+      hit.material_index = tri.material_index;
+      hit.hit = true;
+      hit.texture_index = tri.texture_index;
+      let w = 1.0 - hit_result.u - hit_result.v;
+      hit.uv = w * tri.uv0 + hit_result.u * tri.uv1 + hit_result.v * tri.uv2;
+    }
   }
 
   // Player light sphere — emissive sphere at camera position

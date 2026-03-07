@@ -258,6 +258,9 @@ export function createDungeonScene(): SceneData {
     }
   }
 
+  // Force a torch on wall (4,3) facing -X — visible when player turns right from the phantom
+  torchFaces.add('4,3,1');
+
   let torchCount = 0;
 
   for (let z = 0; z < mapH; z++) {

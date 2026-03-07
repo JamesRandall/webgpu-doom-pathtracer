@@ -7,6 +7,7 @@ import { CollisionDetector } from './doom/collision';
 import { TextureExtractor, TextureAtlas } from './doom/textures';
 import { createDungeonScene, TILE_SIZE } from './scene/dungeon';
 import { DungeonCameraController } from './scene/dungeon-camera';
+import { createPhantomMaterials, createPhantomTriangles } from './scene/phantom';
 
 type ActiveScene = 'doom' | 'dungeon';
 
@@ -109,9 +110,15 @@ async function main() {
   const dungeonScene = createDungeonScene();
   const dungeonCameraController = new DungeonCameraController();
 
+  // Create phantom monster
+  const phantomMats = createPhantomMaterials(dungeonScene.materials.length);
+  dungeonScene.materials.push(...phantomMats.materials);
+  // Place phantom at tile (3, 1) — ahead of player start
+  const phantomTriangles = createPhantomTriangles(3, 1, phantomMats.indices);
+
   // --- Scene switching ---
-  let activeScene: ActiveScene = 'doom';
-  let currentCamera: { update(dt: number): void; getCamera(): Camera; attach(c: HTMLCanvasElement): void } = doomCameraController;
+  let activeScene: ActiveScene = 'dungeon';
+  let currentCamera: { update(dt: number): void; getCamera(): Camera; attach(c: HTMLCanvasElement): void } = dungeonCameraController;
 
   function getActiveSceneData(): { scene: SceneData; atlas: TextureAtlas | null } {
     if (activeScene === 'dungeon') {
@@ -123,9 +130,13 @@ async function main() {
   // Attach both controllers for input, but only the active one will be updated
   doomCameraController.attach(canvas);
   dungeonCameraController.attach(canvas);
+  dungeonCameraController.active = true;
 
   let { scene, atlas } = getActiveSceneData();
   let renderer = new Renderer(device, context, format, canvas.width, canvas.height, currentCamera.getCamera(), scene.triangles, scene.materials, atlas, scene.walkablePositions);
+  if (activeScene === 'dungeon') {
+    renderer.renderDistance = parseInt((document.getElementById('render-dist') as HTMLInputElement).value) * TILE_SIZE;
+  }
   await renderer.initialize();
 
   // UI Controls
@@ -146,6 +157,8 @@ async function main() {
   const renderDistSlider = document.getElementById('render-dist') as HTMLInputElement;
   const renderDistValue = document.getElementById('render-dist-value') as HTMLSpanElement;
   const renderDistLabel = document.getElementById('render-dist-label') as HTMLLabelElement;
+  const phantomCheckbox = document.getElementById('phantom') as HTMLInputElement;
+  const phantomLabel = document.getElementById('phantom-label') as HTMLLabelElement;
 
   // Set initial values from renderer
   // Samples slider: 0 = 1 sample, 1-16 = 4, 8, 12, ... 64 (increments of 4)
@@ -191,6 +204,8 @@ async function main() {
     playerLightLabel.style.display = showDungeon;
     playerFalloffLabel.style.display = showDungeon;
     renderDistLabel.style.display = showDungeon;
+    phantomLabel.style.display = showDungeon;
+    applyPhantom();
     applyPlayerLight();
   }
 
@@ -256,6 +271,27 @@ async function main() {
       await recreateRenderer();
     }
   });
+
+  // Phantom toggle
+  function applyPhantom() {
+    if (activeScene === 'dungeon' && phantomCheckbox.checked) {
+      renderer.setDynamicTriangles(phantomTriangles);
+    } else {
+      renderer.setDynamicTriangles([]);
+    }
+  }
+  phantomCheckbox.addEventListener('change', applyPhantom);
+
+  // Apply initial dungeon settings
+  if (activeScene === 'dungeon') {
+    const showDungeon = '';
+    playerLightLabel.style.display = showDungeon;
+    playerFalloffLabel.style.display = showDungeon;
+    renderDistLabel.style.display = showDungeon;
+    phantomLabel.style.display = showDungeon;
+    applyPhantom();
+    applyPlayerLight();
+  }
 
   let lastTime = performance.now();
   const fpsValueElement = document.getElementById('fps-value') as HTMLSpanElement;

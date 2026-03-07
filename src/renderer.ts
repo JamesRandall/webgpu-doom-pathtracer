@@ -89,6 +89,10 @@ export class Renderer {
   private precomputedBVHs: Map<string, { bvhData: ArrayBuffer; triData: Float32Array; nodeCount: number; triCount: number }> = new Map();
   private currentTileKey: string = '';
 
+  // Dynamic (non-BVH) triangles — e.g. monsters, items
+  private dynamicTriangles: Triangle[] = [];
+  private dynamicTriOffset: number = 0;
+
   constructor(
     device: GPUDevice,
     context: GPUCanvasContext,
@@ -234,11 +238,14 @@ export class Renderer {
     this.updateCameraBuffer();
 
     // Compute max buffer sizes across all precomputed BVHs (or use current data)
-    let maxTriBytes = packTriangles(orderedTriangles).byteLength;
+    // Add extra space for dynamic triangles (monsters, items, etc.)
+    const dynamicTriReserve = 512; // max dynamic triangles
+    const bytesPerTri = 24 * 4; // 24 floats per packed triangle
+    let maxTriBytes = packTriangles(orderedTriangles).byteLength + dynamicTriReserve * bytesPerTri;
     let maxBvhBytes = bvhData.byteLength;
     if (this.precomputedBVHs.size > 0) {
       for (const entry of this.precomputedBVHs.values()) {
-        maxTriBytes = Math.max(maxTriBytes, entry.triData.byteLength);
+        maxTriBytes = Math.max(maxTriBytes, entry.triData.byteLength + dynamicTriReserve * bytesPerTri);
         maxBvhBytes = Math.max(maxBvhBytes, entry.bvhData.byteLength);
       }
     }
@@ -253,10 +260,12 @@ export class Renderer {
       const first = this.precomputedBVHs.get(this.currentTileKey)!;
       this.device.queue.writeBuffer(this.triangleBuffer, 0, first.triData.buffer);
       this.triangleCount = first.triCount;
+      this.dynamicTriOffset = first.triCount;
     } else {
       const triangleData = packTriangles(orderedTriangles);
       this.device.queue.writeBuffer(this.triangleBuffer, 0, triangleData.buffer);
       this.triangleCount = orderedTriangles.length;
+      this.dynamicTriOffset = orderedTriangles.length;
     }
 
     // Create material storage buffer
@@ -277,7 +286,7 @@ export class Renderer {
 
     // Create scene info buffer
     this.sceneInfoBuffer = this.device.createBuffer({
-      size: 48,
+      size: 64,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -825,11 +834,17 @@ export class Renderer {
     this.device.queue.writeBuffer(this.triangleBuffer, 0, entry.triData.buffer);
     this.nodeCount = entry.nodeCount;
     this.triangleCount = entry.triCount;
+    this.dynamicTriOffset = entry.triCount;
     this.currentTileKey = bestKey;
+
+    // Re-upload dynamic triangles after static ones
+    if (this.dynamicTriangles.length > 0) {
+      this.setDynamicTriangles(this.dynamicTriangles);
+    }
   }
 
   private updateSceneInfoBuffer(): void {
-    const buffer = new ArrayBuffer(48);
+    const buffer = new ArrayBuffer(64);
     const u32View = new Uint32Array(buffer);
     const f32View = new Float32Array(buffer);
 
@@ -846,6 +861,11 @@ export class Renderer {
     f32View[9] = this.playerLightColor.y;
     f32View[10] = this.playerLightColor.z;
     f32View[11] = this.playerLightRadius;
+
+    u32View[12] = this.dynamicTriOffset;
+    u32View[13] = this.dynamicTriangles.length;
+    u32View[14] = 0;
+    u32View[15] = 0;
 
     this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, buffer);
   }
@@ -953,6 +973,14 @@ export class Renderer {
     const aspect = this.renderWidth / this.renderHeight;
     const proj = this.buildProjectionMatrix(fovRad, aspect, 0.1, 1000);
     return this.multiplyMatrices(proj, view);
+  }
+
+  setDynamicTriangles(triangles: Triangle[]): void {
+    this.dynamicTriangles = triangles;
+    if (triangles.length > 0) {
+      const data = packTriangles(triangles);
+      this.device.queue.writeBuffer(this.triangleBuffer, this.dynamicTriOffset * 24 * 4, data.buffer);
+    }
   }
 
   updateCamera(camera: Camera): void {
