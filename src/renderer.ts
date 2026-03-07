@@ -24,6 +24,7 @@ export class Renderer {
   private triangles: Triangle[];
   private materials: Material[];
   private textureAtlas: TextureAtlas | null;
+  private walkablePositions: { x: number; z: number }[] | undefined;
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
   public static RESOLUTION_SCALE = 0.5;
@@ -70,15 +71,23 @@ export class Renderer {
   private readonly DENOISE_PASSES = 2; // Step sizes: 1, 2, 4, 8, 16
 
   // Post-processing options (public for UI control)
-  public temporalFrames = 2;  // 0 = off, 1-5 = number of frames to blend
+  public temporalFrames = 0;  // 0 = off, 1-5 = number of frames to blend
   public enableSpatialDenoise = true;
-  public samplesPerPixel = 16;
+  public samplesPerPixel = 12;
   public maxBounces = 4;
 
-  // Player light (point light at camera position)
+  // Player light (emissive sphere at camera position)
   public playerLightColor = { x: 0, y: 0, z: 0 };
   public playerLightRadius = 0;
   public playerLightFalloff = 0.5;
+
+  // Distance culling (world units) for precomputed BVH
+  public renderDistance = 10;
+  private allTriangles: Triangle[] = [];
+
+  // Precomputed BVH per tile position
+  private precomputedBVHs: Map<string, { bvhData: ArrayBuffer; triData: Float32Array; nodeCount: number; triCount: number }> = new Map();
+  private currentTileKey: string = '';
 
   constructor(
     device: GPUDevice,
@@ -89,7 +98,8 @@ export class Renderer {
     camera: Camera,
     triangles: Triangle[],
     materials: Material[],
-    textureAtlas: TextureAtlas | null = null
+    textureAtlas: TextureAtlas | null = null,
+    walkablePositions?: { x: number; z: number }[]
   ) {
     this.device = device;
     this.context = context;
@@ -102,20 +112,41 @@ export class Renderer {
     this.triangles = triangles;
     this.materials = materials;
     this.textureAtlas = textureAtlas;
+    this.walkablePositions = walkablePositions;
     console.log(`Render resolution: ${this.renderWidth}x${this.renderHeight} (${Renderer.RESOLUTION_SCALE}x scale)`);
   }
 
   async initialize(): Promise<void> {
-    // Build BVH
-    const bvhBuilder = new BVHBuilder();
-    const { nodes, orderedTriangles } = bvhBuilder.build(this.triangles);
-    const flatNodes = flattenBVH(nodes);
-    const bvhData = packBVHNodes(flatNodes);
+    let orderedTriangles: Triangle[];
+    let bvhData: ArrayBuffer;
+    this.allTriangles = this.triangles;
 
-    this.nodeCount = nodes.length;
-    this.triangleCount = orderedTriangles.length;
+    if (this.walkablePositions && this.walkablePositions.length > 0) {
+      // Precompute a BVH per walkable tile
+      this.precomputeBVHsForPositions();
 
-    console.log(`BVH built: ${nodes.length} nodes for ${orderedTriangles.length} triangles`);
+      // Use the first position's data to initialize buffers
+      const firstKey = `${this.walkablePositions[0].x},${this.walkablePositions[0].z}`;
+      const first = this.precomputedBVHs.get(firstKey)!;
+      bvhData = first.bvhData;
+      orderedTriangles = this.triangles; // buffer sized for all; actual data swapped per tile
+      this.nodeCount = first.nodeCount;
+      this.triangleCount = first.triCount;
+      this.currentTileKey = firstKey;
+    } else {
+      // Global BVH for all triangles
+      const bvhBuilder = new BVHBuilder();
+      const result = bvhBuilder.build(this.triangles);
+      orderedTriangles = result.orderedTriangles;
+      const flatNodes = flattenBVH(result.nodes);
+      bvhData = packBVHNodes(flatNodes);
+      this.nodeCount = result.nodes.length;
+      console.log(`BVH built: ${result.nodes.length} nodes for ${orderedTriangles.length} triangles`);
+    }
+
+    if (!this.walkablePositions || this.walkablePositions.length === 0) {
+      this.triangleCount = orderedTriangles.length;
+    }
 
     // Create output storage texture (raw path trace output)
     this.outputTexture = this.device.createTexture({
@@ -202,13 +233,31 @@ export class Renderer {
     });
     this.updateCameraBuffer();
 
-    // Create triangle storage buffer (using BVH-ordered triangles)
-    const triangleData = packTriangles(orderedTriangles);
+    // Compute max buffer sizes across all precomputed BVHs (or use current data)
+    let maxTriBytes = packTriangles(orderedTriangles).byteLength;
+    let maxBvhBytes = bvhData.byteLength;
+    if (this.precomputedBVHs.size > 0) {
+      for (const entry of this.precomputedBVHs.values()) {
+        maxTriBytes = Math.max(maxTriBytes, entry.triData.byteLength);
+        maxBvhBytes = Math.max(maxBvhBytes, entry.bvhData.byteLength);
+      }
+    }
+
+    // Create triangle storage buffer — sized for largest precomputed set
     this.triangleBuffer = this.device.createBuffer({
-      size: Math.max(triangleData.byteLength, 32),
+      size: Math.max(maxTriBytes, 32),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    this.device.queue.writeBuffer(this.triangleBuffer, 0, triangleData.buffer);
+    // Upload initial data
+    if (this.precomputedBVHs.size > 0) {
+      const first = this.precomputedBVHs.get(this.currentTileKey)!;
+      this.device.queue.writeBuffer(this.triangleBuffer, 0, first.triData.buffer);
+      this.triangleCount = first.triCount;
+    } else {
+      const triangleData = packTriangles(orderedTriangles);
+      this.device.queue.writeBuffer(this.triangleBuffer, 0, triangleData.buffer);
+      this.triangleCount = orderedTriangles.length;
+    }
 
     // Create material storage buffer
     const materialData = packMaterials(this.materials);
@@ -219,9 +268,9 @@ export class Renderer {
     this.device.queue.writeBuffer(this.materialBuffer, 0, materialData.buffer);
     console.log(`Materials: ${this.materials.length}`);
 
-    // Create BVH storage buffer
+    // Create BVH storage buffer — sized for largest precomputed set
     this.bvhBuffer = this.device.createBuffer({
-      size: Math.max(bvhData.byteLength, 32),
+      size: Math.max(maxBvhBytes, 32),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.device.queue.writeBuffer(this.bvhBuffer, 0, bvhData);
@@ -703,6 +752,82 @@ export class Renderer {
     this.device.queue.writeBuffer(this.cameraBuffer, 0, data);
   }
 
+  private precomputeBVHsForPositions(): void {
+    const positions = this.walkablePositions!;
+    const dist = this.renderDistance;
+    const distSq = dist * dist;
+    let maxTris = 0;
+    let maxNodes = 0;
+
+    const startTime = performance.now();
+
+    for (const pos of positions) {
+      // Cull triangles by distance from this tile center (XZ plane)
+      const culled: Triangle[] = [];
+      for (const tri of this.allTriangles) {
+        const d0 = (tri.v0.x - pos.x) ** 2 + (tri.v0.z - pos.z) ** 2;
+        const d1 = (tri.v1.x - pos.x) ** 2 + (tri.v1.z - pos.z) ** 2;
+        const d2 = (tri.v2.x - pos.x) ** 2 + (tri.v2.z - pos.z) ** 2;
+        if (Math.min(d0, d1, d2) <= distSq) {
+          culled.push(tri);
+        }
+      }
+
+      // Build BVH for this subset
+      const builder = new BVHBuilder();
+      const { nodes, orderedTriangles } = builder.build(culled);
+      const flat = flattenBVH(nodes);
+      const bvhData = packBVHNodes(flat);
+      const triData = packTriangles(orderedTriangles);
+
+      const key = `${pos.x},${pos.z}`;
+      this.precomputedBVHs.set(key, {
+        bvhData,
+        triData,
+        nodeCount: nodes.length,
+        triCount: orderedTriangles.length,
+      });
+
+      maxTris = Math.max(maxTris, orderedTriangles.length);
+      maxNodes = Math.max(maxNodes, nodes.length);
+    }
+
+    const elapsed = (performance.now() - startTime).toFixed(0);
+    console.log(`Precomputed ${positions.length} BVHs in ${elapsed}ms (max ${maxTris} tris, ${maxNodes} nodes per tile)`);
+  }
+
+  private swapBVHForTile(): void {
+    if (this.precomputedBVHs.size === 0) return;
+
+    // Find nearest walkable position to camera
+    const cx = this.camera.position.x;
+    const cz = this.camera.position.z;
+    let bestKey = this.currentTileKey;
+    let bestDist = Infinity;
+
+    for (const pos of this.walkablePositions!) {
+      const dx = pos.x - cx;
+      const dz = pos.z - cz;
+      const d = dx * dx + dz * dz;
+      if (d < bestDist) {
+        bestDist = d;
+        bestKey = `${pos.x},${pos.z}`;
+      }
+    }
+
+    if (bestKey === this.currentTileKey) return;
+
+    const entry = this.precomputedBVHs.get(bestKey);
+    if (!entry) return;
+
+    // Upload this tile's BVH and triangles
+    this.device.queue.writeBuffer(this.bvhBuffer, 0, entry.bvhData);
+    this.device.queue.writeBuffer(this.triangleBuffer, 0, entry.triData.buffer);
+    this.nodeCount = entry.nodeCount;
+    this.triangleCount = entry.triCount;
+    this.currentTileKey = bestKey;
+  }
+
   private updateSceneInfoBuffer(): void {
     const buffer = new ArrayBuffer(48);
     const u32View = new Uint32Array(buffer);
@@ -864,6 +989,11 @@ export class Renderer {
   }
 
   render(): void {
+    // Swap precomputed BVH when player changes tile
+    if (this.precomputedBVHs.size > 0) {
+      this.swapBVHForTile();
+    }
+
     // Update frame counter for RNG
     this.updateSceneInfoBuffer();
     this.frameCount++;
@@ -938,7 +1068,7 @@ export class Renderer {
 
     // If denoise is enabled but temporal is disabled, copy output to temporalOutput
     // so the denoise bind groups work correctly
-    if (numDenoisePasses > 0 && !this.temporalFrames > 0) {
+    if (numDenoisePasses > 0 && !(this.temporalFrames > 0)) {
       commandEncoder.copyTextureToTexture(
         { texture: this.outputTexture },
         { texture: this.temporalOutputTexture },

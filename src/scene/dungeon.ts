@@ -310,6 +310,19 @@ export function createDungeonScene(): SceneData {
     }
   }
 
-  console.log(`Dungeon scene: ${triangles.length} triangles, ${materials.length} materials, ${torchCount} wall torches`);
-  return { triangles, materials };
+  // Collect walkable tile centers for precomputed BVH
+  const walkablePositions: { x: number; z: number }[] = [];
+  for (let z = 0; z < mapH; z++) {
+    for (let x = 0; x < mapW; x++) {
+      if (DUNGEON_MAP[z][x] === 0) {
+        walkablePositions.push({
+          x: x * TILE_SIZE + TILE_SIZE / 2,
+          z: z * TILE_SIZE + TILE_SIZE / 2,
+        });
+      }
+    }
+  }
+
+  console.log(`Dungeon scene: ${triangles.length} triangles, ${materials.length} materials, ${torchCount} wall torches, ${walkablePositions.length} walkable tiles`);
+  return { triangles, materials, walkablePositions };
 }

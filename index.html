@@ -112,8 +112,8 @@
       </div>
       <label>
         <span>Samples/pixel</span>
-        <input type="range" id="samples" min="0" max="16" value="4">
-        <span class="value" id="samples-value">16</span>
+        <input type="range" id="samples" min="0" max="16" value="3">
+        <span class="value" id="samples-value">12</span>
       </label>
       <label>
         <span>Max bounces</span>
@@ -132,8 +132,8 @@
       </label>
       <label>
         <span>Temporal</span>
-        <input type="range" id="temporal" min="0" max="5" value="2" step="1">
-        <span class="value" id="temporal-value">2</span>
+        <input type="range" id="temporal" min="0" max="5" value="0" step="1">
+        <span class="value" id="temporal-value">0</span>
       </label>
       <label>
         <span>Denoise</span>
@@ -141,13 +141,18 @@
       </label>
       <label id="player-light-label" style="display: none;">
         <span>Player torch</span>
-        <input type="range" id="player-light" min="0" max="20" value="3" step="1">
-        <span class="value" id="player-light-value">3</span>
+        <input type="range" id="player-light" min="0" max="20" value="17" step="1">
+        <span class="value" id="player-light-value">17</span>
       </label>
       <label id="player-falloff-label" style="display: none;">
-        <span>Torch falloff</span>
-        <input type="range" id="player-falloff" min="1" max="20" value="11" step="1">
-        <span class="value" id="player-falloff-value">11</span>
+        <span>Torch size</span>
+        <input type="range" id="player-falloff" min="1" max="20" value="8" step="1">
+        <span class="value" id="player-falloff-value">8</span>
+      </label>
+      <label id="render-dist-label" style="display: none;">
+        <span>View distance</span>
+        <input type="range" id="render-dist" min="2" max="10" value="10" step="1">
+        <span class="value" id="render-dist-value">10</span>
       </label>
     </div>
   </div>

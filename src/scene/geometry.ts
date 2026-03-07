@@ -147,6 +147,7 @@ export interface SceneData {
   triangles: Triangle[];
   materials: Material[];
   pointLights?: PointLight[];
+  walkablePositions?: { x: number; z: number }[];
 }
 
 // Create Cornell box scene

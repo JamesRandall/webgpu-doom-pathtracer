@@ -5,7 +5,7 @@ import { WadParser } from './doom/wad-parser';
 import { convertLevelToScene, setTextureAtlas } from './doom/level-converter';
 import { CollisionDetector } from './doom/collision';
 import { TextureExtractor, TextureAtlas } from './doom/textures';
-import { createDungeonScene } from './scene/dungeon';
+import { createDungeonScene, TILE_SIZE } from './scene/dungeon';
 import { DungeonCameraController } from './scene/dungeon-camera';
 
 type ActiveScene = 'doom' | 'dungeon';
@@ -125,7 +125,7 @@ async function main() {
   dungeonCameraController.attach(canvas);
 
   let { scene, atlas } = getActiveSceneData();
-  let renderer = new Renderer(device, context, format, canvas.width, canvas.height, currentCamera.getCamera(), scene.triangles, scene.materials, atlas);
+  let renderer = new Renderer(device, context, format, canvas.width, canvas.height, currentCamera.getCamera(), scene.triangles, scene.materials, atlas, scene.walkablePositions);
   await renderer.initialize();
 
   // UI Controls
@@ -143,6 +143,9 @@ async function main() {
   const playerFalloffSlider = document.getElementById('player-falloff') as HTMLInputElement;
   const playerFalloffValue = document.getElementById('player-falloff-value') as HTMLSpanElement;
   const playerFalloffLabel = document.getElementById('player-falloff-label') as HTMLLabelElement;
+  const renderDistSlider = document.getElementById('render-dist') as HTMLInputElement;
+  const renderDistValue = document.getElementById('render-dist-value') as HTMLSpanElement;
+  const renderDistLabel = document.getElementById('render-dist-label') as HTMLLabelElement;
 
   // Set initial values from renderer
   // Samples slider: 0 = 1 sample, 1-16 = 4, 8, 12, ... 64 (increments of 4)
@@ -174,7 +177,11 @@ async function main() {
     const data = getActiveSceneData();
     scene = data.scene;
     atlas = data.atlas;
-    renderer = new Renderer(device, context, format, canvas.width, canvas.height, currentCamera.getCamera(), scene.triangles, scene.materials, atlas);
+    renderer = new Renderer(device, context, format, canvas.width, canvas.height, currentCamera.getCamera(), scene.triangles, scene.materials, atlas, scene.walkablePositions);
+    // Set render distance BEFORE initialize (needed for BVH precomputation)
+    if (activeScene === 'dungeon') {
+      renderer.renderDistance = parseInt(renderDistSlider.value) * TILE_SIZE;
+    }
     await renderer.initialize();
     renderer.samplesPerPixel = samplesToSlider(parseInt(samplesSlider.value));
     renderer.maxBounces = parseInt(bouncesSlider.value);
@@ -183,6 +190,7 @@ async function main() {
     const showDungeon = activeScene === 'dungeon' ? '' : 'none';
     playerLightLabel.style.display = showDungeon;
     playerFalloffLabel.style.display = showDungeon;
+    renderDistLabel.style.display = showDungeon;
     applyPlayerLight();
   }
 
@@ -221,16 +229,16 @@ async function main() {
     renderer.enableSpatialDenoise = denoiseCheckbox.checked;
   });
 
-  // Player torch light intensity and falloff
+  // Player torch light intensity and size
   function applyPlayerLight() {
     const intensity = parseFloat(playerLightSlider.value) / 10.0;
-    const falloff = parseFloat(playerFalloffSlider.value) / 10.0;
+    const sizeVal = parseFloat(playerFalloffSlider.value);
     playerLightValue.textContent = playerLightSlider.value;
     playerFalloffValue.textContent = playerFalloffSlider.value;
     if (activeScene === 'dungeon' && intensity > 0) {
       renderer.playerLightColor = { x: 3.5 * intensity, y: 2.4 * intensity, z: 1.0 * intensity };
-      renderer.playerLightRadius = 6.0;
-      renderer.playerLightFalloff = falloff;
+      // Sphere radius: slider 1-20 maps to radius 0.02-0.4
+      renderer.playerLightRadius = sizeVal * 0.02;
     } else {
       renderer.playerLightColor = { x: 0, y: 0, z: 0 };
       renderer.playerLightRadius = 0;
@@ -238,6 +246,16 @@ async function main() {
   }
   playerLightSlider.addEventListener('input', applyPlayerLight);
   playerFalloffSlider.addEventListener('input', applyPlayerLight);
+
+  // View distance (in tiles) — changing requires BVH rebuild
+  renderDistSlider.addEventListener('input', () => {
+    renderDistValue.textContent = renderDistSlider.value;
+  });
+  renderDistSlider.addEventListener('change', async () => {
+    if (activeScene === 'dungeon') {
+      await recreateRenderer();
+    }
+  });
 
   let lastTime = performance.now();
   const fpsValueElement = document.getElementById('fps-value') as HTMLSpanElement;

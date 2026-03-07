@@ -335,8 +335,24 @@ fn intersect_aabb_t(ray_origin: vec3f, ray_dir_inv: vec3f, box_min: vec3f, box_m
   return vec2f(tmin, tmax);
 }
 
-// Trace ray using BVH with ordered traversal
-fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
+// Ray-sphere intersection, returns t or -1
+fn intersect_sphere(ray_origin: vec3f, ray_dir: vec3f, center: vec3f, radius: f32) -> f32 {
+  let oc = ray_origin - center;
+  let b = dot(oc, ray_dir);
+  let c = dot(oc, oc) - radius * radius;
+  let disc = b * b - c;
+  if (disc < 0.0) { return -1.0; }
+  let sqrt_disc = sqrt(disc);
+  var t = -b - sqrt_disc;
+  if (t < 0.001) {
+    t = -b + sqrt_disc;
+  }
+  if (t < 0.001) { return -1.0; }
+  return t;
+}
+
+// Brute-force trace all triangles (no BVH)
+fn trace_brute(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   var closest_hit: HitInfo;
   closest_hit.t = 1e30;
   closest_hit.hit = false;
@@ -344,9 +360,31 @@ fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   closest_hit.uv = vec2f(0.0, 0.0);
   closest_hit.texture_index = -1;
 
-  if (scene_info.node_count == 0u) {
-    return closest_hit;
+  for (var i = 0u; i < scene_info.triangle_count; i++) {
+    let tri = triangles[i];
+    let hit_result = intersect_triangle_uv(ray_origin, ray_dir, tri.v0, tri.v1, tri.v2);
+    if (hit_result.t > 0.0 && hit_result.t < closest_hit.t) {
+      closest_hit.t = hit_result.t;
+      closest_hit.normal = tri.normal;
+      closest_hit.material_index = tri.material_index;
+      closest_hit.hit = true;
+      closest_hit.texture_index = tri.texture_index;
+      let w = 1.0 - hit_result.u - hit_result.v;
+      closest_hit.uv = w * tri.uv0 + hit_result.u * tri.uv1 + hit_result.v * tri.uv2;
+    }
   }
+
+  return closest_hit;
+}
+
+// Trace ray using BVH with ordered traversal
+fn trace_bvh_accel(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
+  var closest_hit: HitInfo;
+  closest_hit.t = 1e30;
+  closest_hit.hit = false;
+  closest_hit.material_index = 0u;
+  closest_hit.uv = vec2f(0.0, 0.0);
+  closest_hit.texture_index = -1;
 
   let ray_dir_inv = 1.0 / ray_dir;
 
@@ -391,20 +429,16 @@ fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
       let right_child = node.right_child_or_count;
 
       if (stack_ptr < MAX_STACK_SIZE - 1u) {
-        // Get both children nodes
         let left_node = bvh_nodes[left_child];
         let right_node = bvh_nodes[right_child];
 
-        // Test both boxes and get t values
         let left_t = intersect_aabb_t(ray_origin, ray_dir_inv, left_node.min_bounds, left_node.max_bounds);
         let right_t = intersect_aabb_t(ray_origin, ray_dir_inv, right_node.min_bounds, right_node.max_bounds);
 
         let left_hit = left_t.y >= left_t.x && left_t.x < closest_hit.t && left_t.y > 0.0;
         let right_hit = right_t.y >= right_t.x && right_t.x < closest_hit.t && right_t.y > 0.0;
 
-        // Push children in far-to-near order (so near is popped first)
         if (left_hit && right_hit) {
-          // Both hit - push far one first, near one second
           if (left_t.x < right_t.x) {
             stack[stack_ptr] = right_child;
             stack_ptr += 1u;
@@ -428,6 +462,33 @@ fn trace_bvh(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
   }
 
   return closest_hit;
+}
+
+// Unified trace: pick brute force or BVH, then test player light sphere
+fn trace_scene(ray_origin: vec3f, ray_dir: vec3f) -> HitInfo {
+  var hit: HitInfo;
+  if (scene_info.node_count == 0u) {
+    hit = trace_brute(ray_origin, ray_dir);
+  } else {
+    hit = trace_bvh_accel(ray_origin, ray_dir);
+  }
+
+  // Player light sphere — emissive sphere at camera position
+  // Only test if ray origin is outside the sphere (skip primary rays from camera)
+  if (scene_info.player_light_radius > 0.0 && length(ray_origin - camera.position) > scene_info.player_light_radius + 0.01) {
+    let sphere_t = intersect_sphere(ray_origin, ray_dir, camera.position, scene_info.player_light_radius);
+    if (sphere_t > 0.0 && sphere_t < hit.t) {
+      hit.t = sphere_t;
+      let hit_pos = ray_origin + ray_dir * sphere_t;
+      hit.normal = normalize(hit_pos - camera.position);
+      hit.material_index = 0u;
+      hit.hit = true;
+      hit.texture_index = -2; // sentinel for player light sphere
+      hit.uv = vec2f(0.0, 0.0);
+    }
+  }
+
+  return hit;
 }
 
 // Generate camera ray for a given pixel
@@ -455,7 +516,7 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
   var radiance = vec3f(0.0);
 
   for (var bounce = 0u; bounce < scene_info.max_bounces; bounce++) {
-    let hit = trace_bvh(ray_origin, ray_dir);
+    let hit = trace_scene(ray_origin, ray_dir);
 
     if (!hit.hit) {
       // Miss - return background (dark for indoor scene)
@@ -472,6 +533,12 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       *out_depth = hit.t;
     }
 
+    // Player light sphere hit — treat as emissive and stop
+    if (hit.texture_index == -2) {
+      radiance += throughput * scene_info.player_light_color;
+      break;
+    }
+
     // Get material properties
     let mat = materials[hit.material_index];
 
@@ -480,18 +547,15 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
     let tex_color = sample_texture(hit.texture_index, hit.uv, atlas_size);
 
     // Combine texture color with material
-    // For textured surfaces: use texture color directly, scaled by material brightness
-    // For untextured: use material albedo
     var surface_color: vec3f;
     if (hit.texture_index >= 0) {
-      // Use average of material albedo as brightness multiplier
       let brightness = (mat.albedo.x + mat.albedo.y + mat.albedo.z) / 3.0;
       surface_color = tex_color.rgb * brightness;
     } else {
       surface_color = mat.albedo;
     }
 
-    // Add emissive contribution (textures don't affect emissive)
+    // Add emissive contribution
     radiance += throughput * mat.emissive;
 
     // Calculate hit position
@@ -501,23 +565,6 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
     var normal = hit.normal;
     if (dot(ray_dir, normal) > 0.0) {
       normal = -normal;
-    }
-
-    // Player torch light (single direct light at camera position)
-    if (scene_info.player_light_radius > 0.0 && bounce == 0u) {
-      let to_light = camera.position - hit_pos;
-      let light_dist = length(to_light);
-      let light_dir = to_light / light_dist;
-      let n_dot_l = max(dot(normal, light_dir), 0.0);
-
-      if (n_dot_l > 0.0) {
-        let shadow_hit = trace_bvh(hit_pos + normal * 0.002, light_dir);
-        if (!shadow_hit.hit || shadow_hit.t > light_dist - 0.01) {
-          let fo = scene_info.player_light_falloff;
-          let falloff = 1.0 / (1.0 + fo * light_dist + 0.25 * fo * light_dist * light_dist);
-          radiance += throughput * surface_color * scene_info.player_light_color * n_dot_l * falloff;
-        }
-      }
     }
 
     // Handle different material types
