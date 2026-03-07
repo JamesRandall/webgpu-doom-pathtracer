@@ -27,7 +27,7 @@ export class Renderer {
   private walkablePositions: { x: number; z: number }[] | undefined;
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
-  public static RESOLUTION_SCALE = 0.5;
+  public static RESOLUTION_SCALE = 1.0;
   private frameCount: number = 0;
   private nodeCount: number = 0;
   private triangleCount: number = 0;
@@ -73,7 +73,7 @@ export class Renderer {
   // Post-processing options (public for UI control)
   public temporalFrames = 0;  // 0 = off, 1-5 = number of frames to blend
   public enableSpatialDenoise = true;
-  public samplesPerPixel = 12;
+  public samplesPerPixel = 8;
   public maxBounces = 4;
 
   // Player light (emissive sphere at camera position)

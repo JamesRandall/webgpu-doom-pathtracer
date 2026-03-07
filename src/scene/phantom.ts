@@ -120,8 +120,19 @@ export function createPhantomTriangles(
   tileZ: number,
   m: PhantomMaterials
 ): Triangle[] {
-  const cx = tileX * TILE_SIZE + TILE_SIZE / 2;
-  const cz = tileZ * TILE_SIZE + TILE_SIZE / 2;
+  return createPhantomTrianglesAt(
+    tileX * TILE_SIZE + TILE_SIZE / 2,
+    tileZ * TILE_SIZE + TILE_SIZE / 2,
+    m,
+  );
+}
+
+// Generate phantom triangles at an arbitrary world position (cx, cz)
+export function createPhantomTrianglesAt(
+  cx: number,
+  cz: number,
+  m: PhantomMaterials
+): Triangle[] {
   const tris: Triangle[] = [];
 
   // Scale: roughly 1.7 units tall, ~0.5 wide body

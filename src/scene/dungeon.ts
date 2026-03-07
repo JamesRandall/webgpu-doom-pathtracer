@@ -56,22 +56,21 @@ function computeNormal(v0: Vec3, v1: Vec3, v2: Vec3): Vec3 {
   return { x: n.x / len, y: n.y / len, z: n.z / len };
 }
 
-function makeTriangle(v0: Vec3, v1: Vec3, v2: Vec3, materialIndex: number): Triangle {
+function makeTriangle(v0: Vec3, v1: Vec3, v2: Vec3, materialIndex: number,
+  uv0 = { u: 0, v: 0 }, uv1 = { u: 1, v: 0 }, uv2 = { u: 1, v: 1 }, texIdx = -1): Triangle {
   return {
     v0, v1, v2,
     normal: computeNormal(v0, v1, v2),
     materialIndex,
-    uv0: { u: 0, v: 0 },
-    uv1: { u: 1, v: 0 },
-    uv2: { u: 1, v: 1 },
-    textureIndex: -1,
+    uv0, uv1, uv2,
+    textureIndex: texIdx,
   };
 }
 
-function makeQuad(v0: Vec3, v1: Vec3, v2: Vec3, v3: Vec3, mat: number): Triangle[] {
+function makeQuad(v0: Vec3, v1: Vec3, v2: Vec3, v3: Vec3, mat: number, texIdx = -1): Triangle[] {
   return [
-    makeTriangle(v0, v1, v2, mat),
-    makeTriangle(v0, v2, v3, mat),
+    makeTriangle(v0, v1, v2, mat, { u: 0, v: 0 }, { u: 1, v: 0 }, { u: 1, v: 1 }, texIdx),
+    makeTriangle(v0, v2, v3, mat, { u: 0, v: 0 }, { u: 1, v: 1 }, { u: 0, v: 1 }, texIdx),
   ];
 }
 
@@ -80,7 +79,7 @@ function makeQuad(v0: Vec3, v1: Vec3, v2: Vec3, v3: Vec3, mat: number): Triangle
 // facing: 0=+X, 1=-X, 2=+Z, 3=-Z
 function makeWallWithTorch(
   wx: number, wz: number, facing: number,
-  matWall: number, matTorch: number,
+  matWall: number, matTorch: number, wallTexIdx = -1,
 ): Triangle[] {
   const tris: Triangle[] = [];
   const S = TILE_SIZE;
@@ -145,14 +144,14 @@ function makeWallWithTorch(
         ];
         break;
     }
-    tris.push(...makeQuad(q[0], q[1], q[2], q[3], r.mat));
+    tris.push(...makeQuad(q[0], q[1], q[2], q[3], r.mat, r.mat === matTorch ? -1 : wallTexIdx));
   }
 
   return tris;
 }
 
 function makeWallFace(
-  wx: number, wz: number, facing: number, mat: number,
+  wx: number, wz: number, facing: number, mat: number, texIdx = -1,
 ): Triangle[] {
   const S = TILE_SIZE;
   const H = WALL_HEIGHT;
@@ -164,7 +163,7 @@ function makeWallFace(
         { x: wx + S, y: 0, z: wz + S },
         { x: wx + S, y: H, z: wz + S },
         { x: wx + S, y: H, z: wz },
-        mat,
+        mat, texIdx,
       );
     case 1: // -X
       return makeQuad(
@@ -172,7 +171,7 @@ function makeWallFace(
         { x: wx, y: 0, z: wz },
         { x: wx, y: H, z: wz },
         { x: wx, y: H, z: wz + S },
-        mat,
+        mat, texIdx,
       );
     case 2: // +Z
       return makeQuad(
@@ -180,7 +179,7 @@ function makeWallFace(
         { x: wx, y: 0, z: wz + S },
         { x: wx, y: H, z: wz + S },
         { x: wx + S, y: H, z: wz + S },
-        mat,
+        mat, texIdx,
       );
     case 3: // -Z
     default:
@@ -189,18 +188,27 @@ function makeWallFace(
         { x: wx + S, y: 0, z: wz },
         { x: wx + S, y: H, z: wz },
         { x: wx, y: H, z: wz },
-        mat,
+        mat, texIdx,
       );
   }
 }
 
-export function createDungeonScene(): SceneData {
+export interface DungeonTextureIndices {
+  wall: number;
+  floor: number;
+  ceiling: number;
+}
+
+export function createDungeonScene(tex?: DungeonTextureIndices): SceneData {
   const triangles: Triangle[] = [];
   const materials: Material[] = [];
 
+  // When textures are provided, use white albedo so texture color comes through
+  const hasTextures = !!tex;
+
   // 0: Stone floor
   materials.push({
-    albedo: { x: 0.35, y: 0.33, z: 0.30 },
+    albedo: hasTextures ? { x: 1, y: 1, z: 1 } : { x: 0.35, y: 0.33, z: 0.30 },
     emissive: { x: 0, y: 0, z: 0 },
     roughness: 1.0,
     materialType: MATERIAL_DIFFUSE,
@@ -208,7 +216,7 @@ export function createDungeonScene(): SceneData {
 
   // 1: Stone wall
   materials.push({
-    albedo: { x: 0.45, y: 0.42, z: 0.38 },
+    albedo: hasTextures ? { x: 1, y: 1, z: 1 } : { x: 0.45, y: 0.42, z: 0.38 },
     emissive: { x: 0, y: 0, z: 0 },
     roughness: 1.0,
     materialType: MATERIAL_DIFFUSE,
@@ -216,7 +224,7 @@ export function createDungeonScene(): SceneData {
 
   // 2: Ceiling
   materials.push({
-    albedo: { x: 0.3, y: 0.28, z: 0.25 },
+    albedo: hasTextures ? { x: 1, y: 1, z: 1 } : { x: 0.3, y: 0.28, z: 0.25 },
     emissive: { x: 0, y: 0, z: 0 },
     roughness: 1.0,
     materialType: MATERIAL_DIFFUSE,
@@ -234,6 +242,10 @@ export function createDungeonScene(): SceneData {
   const MAT_WALL = 1;
   const MAT_CEILING = 2;
   const MAT_TORCH = 3;
+
+  const TEX_WALL = tex ? tex.wall : -1;
+  const TEX_FLOOR = tex ? tex.floor : -1;
+  const TEX_CEILING = tex ? tex.ceiling : -1;
 
   const mapH = DUNGEON_MAP.length;
   const mapW = DUNGEON_MAP[0].length;
@@ -285,10 +297,10 @@ export function createDungeonScene(): SceneData {
 
           const key = `${x},${z},${n.facing}`;
           if (torchFaces.has(key)) {
-            triangles.push(...makeWallWithTorch(wx, wz, n.facing, MAT_WALL, MAT_TORCH));
+            triangles.push(...makeWallWithTorch(wx, wz, n.facing, MAT_WALL, MAT_TORCH, TEX_WALL));
             torchCount++;
           } else {
-            triangles.push(...makeWallFace(wx, wz, n.facing, MAT_WALL));
+            triangles.push(...makeWallFace(wx, wz, n.facing, MAT_WALL, TEX_WALL));
           }
         }
       } else {
@@ -298,7 +310,7 @@ export function createDungeonScene(): SceneData {
           { x: wx + TILE_SIZE, y: 0, z: wz },
           { x: wx + TILE_SIZE, y: 0, z: wz + TILE_SIZE },
           { x: wx, y: 0, z: wz + TILE_SIZE },
-          MAT_FLOOR,
+          MAT_FLOOR, TEX_FLOOR,
         ));
         // Ceiling — slightly below wall height to avoid coplanar
         const ceilY = WALL_HEIGHT - 0.005;
@@ -307,7 +319,7 @@ export function createDungeonScene(): SceneData {
           { x: wx + TILE_SIZE, y: ceilY, z: wz + TILE_SIZE },
           { x: wx + TILE_SIZE, y: ceilY, z: wz },
           { x: wx, y: ceilY, z: wz },
-          MAT_CEILING,
+          MAT_CEILING, TEX_CEILING,
         ));
       }
     }

@@ -7,7 +7,8 @@ import { CollisionDetector } from './doom/collision';
 import { TextureExtractor, TextureAtlas } from './doom/textures';
 import { createDungeonScene, TILE_SIZE } from './scene/dungeon';
 import { DungeonCameraController } from './scene/dungeon-camera';
-import { createPhantomMaterials, createPhantomTriangles } from './scene/phantom';
+import { createPhantomMaterials, createPhantomTrianglesAt } from './scene/phantom';
+import { getDungeonMap } from './scene/dungeon';
 
 type ActiveScene = 'doom' | 'dungeon';
 
@@ -107,14 +108,62 @@ async function main() {
   }
 
   // --- Scene 2: Dungeon Crawler ---
-  const dungeonScene = createDungeonScene();
+  // Load dungeon texture atlas (10x8 grid of 64x64 tiles)
+  let dungeonTextureAtlas: TextureAtlas | null = null;
+  const ATLAS_COLS = 10;
+  const ATLAS_ROWS = 8;
+  const TILE_PX = 64;
+  let dungeonTexIndices: { wall: number; floor: number; ceiling: number } | undefined;
+
+  try {
+    const img = new Image();
+    img.src = '/heretic64x64.png';
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Failed to load dungeon atlas'));
+    });
+
+    const atlasCanvas = document.createElement('canvas');
+    atlasCanvas.width = img.width;
+    atlasCanvas.height = img.height;
+    const ctx2d = atlasCanvas.getContext('2d')!;
+    ctx2d.drawImage(img, 0, 0);
+    const imageData = ctx2d.getImageData(0, 0, img.width, img.height);
+
+    const entries = new Map<string, { name: string; x: number; y: number; width: number; height: number }>();
+    // Wall texture: tile (0,0)
+    entries.set('wall', { name: 'wall', x: 0 * TILE_PX, y: 0 * TILE_PX, width: TILE_PX, height: TILE_PX });
+    // Floor texture: tile (0,7)
+    entries.set('floor', { name: 'floor', x: 0 * TILE_PX, y: 7 * TILE_PX, width: TILE_PX, height: TILE_PX });
+    // Ceiling texture: tile (4,0)
+    entries.set('ceiling', { name: 'ceiling', x: 4 * TILE_PX, y: 0 * TILE_PX, width: TILE_PX, height: TILE_PX });
+
+    dungeonTextureAtlas = {
+      image: new Uint8Array(imageData.data.buffer),
+      width: img.width,
+      height: img.height,
+      entries,
+    };
+
+    // Atlas entry indices match iteration order: wall=0, floor=1, ceiling=2
+    dungeonTexIndices = { wall: 0, floor: 1, ceiling: 2 };
+    console.log(`Dungeon atlas loaded: ${img.width}x${img.height}`);
+  } catch (e) {
+    console.warn('Failed to load dungeon texture atlas:', e);
+  }
+
+  const dungeonScene = createDungeonScene(dungeonTexIndices);
   const dungeonCameraController = new DungeonCameraController();
 
-  // Create phantom monster
+  // Create phantom monster — moves back and forth
   const phantomMats = createPhantomMaterials(dungeonScene.materials.length);
   dungeonScene.materials.push(...phantomMats.materials);
-  // Place phantom at tile (3, 1) — ahead of player start
-  const phantomTriangles = createPhantomTriangles(3, 1, phantomMats.indices);
+  const dungeonMap = getDungeonMap();
+  const phantomX = 3 * TILE_SIZE + TILE_SIZE / 2; // world X (fixed column)
+  let phantomZ = 1 * TILE_SIZE + TILE_SIZE / 2; // world Z
+  let phantomDirZ = 1; // moving in +Z direction
+  const phantomSpeed = 1.0; // world units per second
+  let phantomTriangles = createPhantomTrianglesAt(phantomX, phantomZ, phantomMats.indices);
 
   // --- Scene switching ---
   let activeScene: ActiveScene = 'dungeon';
@@ -122,7 +171,7 @@ async function main() {
 
   function getActiveSceneData(): { scene: SceneData; atlas: TextureAtlas | null } {
     if (activeScene === 'dungeon') {
-      return { scene: dungeonScene, atlas: null };
+      return { scene: dungeonScene, atlas: dungeonTextureAtlas };
     }
     return { scene: doomScene, atlas: doomTextureAtlas };
   }
@@ -315,6 +364,22 @@ async function main() {
     lastTime = currentTime;
 
     currentCamera.update(deltaTime);
+
+    // Animate phantom
+    if (activeScene === 'dungeon' && phantomCheckbox.checked) {
+      const newZ = phantomZ + phantomDirZ * phantomSpeed * deltaTime;
+      // Check if next tile in movement direction is a wall
+      const tileX = Math.floor(phantomX / TILE_SIZE);
+      const tileZ = Math.floor(newZ / TILE_SIZE);
+      if (dungeonMap[tileZ]?.[tileX] === 1) {
+        phantomDirZ = -phantomDirZ; // reverse
+      } else {
+        phantomZ = newZ;
+      }
+      phantomTriangles = createPhantomTrianglesAt(phantomX, phantomZ, phantomMats.indices);
+      renderer.setDynamicTriangles(phantomTriangles);
+    }
+
     renderer.updateCamera(currentCamera.getCamera());
     renderer.render();
 
