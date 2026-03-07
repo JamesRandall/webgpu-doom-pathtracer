@@ -990,6 +990,8 @@ export class Renderer {
 
   setDynamicTriangles(triangles: Triangle[]): void {
     this.dynamicTriangles = triangles;
+    // Dynamic objects moved — invalidate temporal accumulation
+    this.staticFrameCount = 0;
     if (triangles.length > 0) {
       const data = packTriangles(triangles);
       this.device.queue.writeBuffer(this.triangleBuffer, this.dynamicTriOffset * 24 * 4, data.buffer);
