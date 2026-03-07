@@ -1031,14 +1031,12 @@ export class Renderer {
     }
 
     // Store previous camera for temporal reprojection (before updating)
-    if (this.prevCamera === null) {
-      this.prevCamera = {
-        position: { ...camera.position },
-        direction: { ...camera.direction },
-        up: { ...camera.up },
-        fov: camera.fov,
-      };
-    }
+    this.prevCamera = {
+      position: { ...this.camera.position },
+      direction: { ...this.camera.direction },
+      up: { ...this.camera.up },
+      fov: this.camera.fov,
+    };
 
     this.camera = camera;
     this.updateCameraBuffer();
@@ -1054,17 +1052,14 @@ export class Renderer {
     this.updateSceneInfoBuffer();
     this.frameCount++;
 
-    // Temporal reprojection: blend factor = 1/(N+1) for N history frames
-    const blendFactor = this.temporalFrames > 0 ? 1.0 / (this.temporalFrames + 1) : 1.0;
-
     const temporalParamsData = new ArrayBuffer(32);
     const temporalParamsFloat = new Float32Array(temporalParamsData);
     const temporalParamsUint = new Uint32Array(temporalParamsData);
     temporalParamsFloat[0] = this.renderWidth;
     temporalParamsFloat[1] = this.renderHeight;
-    temporalParamsFloat[2] = blendFactor;
-    temporalParamsFloat[3] = 0.5;  // depth_threshold
-    temporalParamsUint[4] = this.staticFrameCount;  // For disabling clamping when static
+    temporalParamsFloat[2] = 0.05;  // moving_blend_factor (current frame contribution when moving)
+    temporalParamsFloat[3] = 0.1;   // depth_threshold (relative)
+    temporalParamsUint[4] = this.staticFrameCount;
     this.device.queue.writeBuffer(this.temporalParamsBuffer, 0, temporalParamsData);
 
     // Update camera matrices for temporal reprojection

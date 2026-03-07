@@ -1,20 +1,22 @@
 // Temporal reprojection shader
-// Blends current frame with reprojected history for stable image during movement
+// Blends current noisy frame with reprojected history for progressive accumulation.
+// Static camera: true 1/N Monte Carlo averaging.
+// Moving camera: conservative blend with YCoCg neighbourhood clamping.
 
 struct TemporalParams {
   screen_width: f32,
   screen_height: f32,
-  blend_factor: f32,    // Base blend factor when history is valid
-  depth_threshold: f32, // Threshold for depth rejection
-  static_frame_count: u32, // Number of frames camera has been static (0 = moving)
+  moving_blend_factor: f32, // Current frame weight when camera is moving (0.05 = 5%)
+  depth_threshold: f32,     // Relative depth threshold for disocclusion
+  static_frame_count: u32,  // Frames camera has been static (0 = moving)
   _pad0: u32,
   _pad1: u32,
   _pad2: u32,
 }
 
 struct CameraMatrices {
-  inv_view_proj: mat4x4f,      // Current frame inverse view-projection
-  prev_view_proj: mat4x4f,     // Previous frame view-projection
+  inv_view_proj: mat4x4f,
+  prev_view_proj: mat4x4f,
 }
 
 @group(0) @binding(0) var current_color: texture_2d<f32>;
@@ -26,28 +28,43 @@ struct CameraMatrices {
 @group(0) @binding(6) var<uniform> params: TemporalParams;
 @group(0) @binding(7) var<uniform> matrices: CameraMatrices;
 
-// Reconstruct world position from pixel coordinates and depth
+// --- Colour space conversion ---
+
+fn rgb_to_ycocg(rgb: vec3f) -> vec3f {
+  let y  =  0.25 * rgb.r + 0.5 * rgb.g + 0.25 * rgb.b;
+  let co =  0.5  * rgb.r                - 0.5  * rgb.b;
+  let cg = -0.25 * rgb.r + 0.5 * rgb.g - 0.25 * rgb.b;
+  return vec3f(y, co, cg);
+}
+
+fn ycocg_to_rgb(ycocg: vec3f) -> vec3f {
+  let y  = ycocg.x;
+  let co = ycocg.y;
+  let cg = ycocg.z;
+  return vec3f(y + co - cg, y + cg, y - co - cg);
+}
+
+// --- World position reconstruction ---
+
 fn reconstruct_world_pos(pixel: vec2f, depth: f32) -> vec3f {
   let ndc = vec2f(
     (pixel.x / params.screen_width) * 2.0 - 1.0,
     1.0 - (pixel.y / params.screen_height) * 2.0
   );
 
-  // Use depth as view-space z for reconstruction
-  // We store ray t-value, so world pos = camera_pos + ray_dir * t
-  // For proper reconstruction, we need inv_view_proj
   let clip = vec4f(ndc, 0.0, 1.0);
   let view_dir = matrices.inv_view_proj * clip;
+  // Ray tracer uses normalized direction, so normalize here to match
   let ray_dir = normalize(view_dir.xyz / view_dir.w);
 
-  // Get camera position from inverse view-proj (last column transformed)
   let cam_pos_h = matrices.inv_view_proj * vec4f(0.0, 0.0, 0.0, 1.0);
   let cam_pos = cam_pos_h.xyz / cam_pos_h.w;
 
   return cam_pos + ray_dir * depth;
 }
 
-// Reproject world position to previous frame screen coordinates
+// --- Reprojection ---
+
 fn reproject(world_pos: vec3f) -> vec2f {
   let clip = matrices.prev_view_proj * vec4f(world_pos, 1.0);
   let ndc = clip.xy / clip.w;
@@ -57,31 +74,36 @@ fn reproject(world_pos: vec3f) -> vec2f {
   );
 }
 
-// Compute expected depth at world position in previous frame
+// Compute expected depth (view-space distance) at world position in previous frame
 fn compute_expected_depth(world_pos: vec3f) -> f32 {
   let clip = matrices.prev_view_proj * vec4f(world_pos, 1.0);
-  // Return the w component which represents distance from camera
   return clip.w;
 }
 
-// Sample 3x3 neighbourhood and compute min/max for clamping
-fn get_neighbourhood_bounds(center: vec2i) -> array<vec3f, 2> {
-  var min_col = vec3f(1e10);
-  var max_col = vec3f(-1e10);
+// --- Neighbourhood statistics in YCoCg ---
+
+fn get_neighbourhood_stats(center: vec2i) -> array<vec3f, 2> {
+  // Returns [mean, stddev] in YCoCg space
+  var sum = vec3f(0.0);
+  var sum_sq = vec3f(0.0);
 
   for (var dy = -1; dy <= 1; dy++) {
     for (var dx = -1; dx <= 1; dx++) {
-      let sample_pos = center + vec2i(dx, dy);
-      let col = textureLoad(current_color, sample_pos, 0).rgb;
-      min_col = min(min_col, col);
-      max_col = max(max_col, col);
+      let col = textureLoad(current_color, center + vec2i(dx, dy), 0).rgb;
+      let ycocg = rgb_to_ycocg(col);
+      sum += ycocg;
+      sum_sq += ycocg * ycocg;
     }
   }
 
-  return array<vec3f, 2>(min_col, max_col);
+  let mean = sum / 9.0;
+  let variance = max(sum_sq / 9.0 - mean * mean, vec3f(0.0));
+  let stddev = sqrt(variance);
+  return array<vec3f, 2>(mean, stddev);
 }
 
-// Bilinear sample from history (manual implementation for storage texture compatibility)
+// --- Bilinear history sampling ---
+
 fn sample_history_bilinear(pos: vec2f) -> vec3f {
   let dims = vec2f(params.screen_width, params.screen_height);
   let pos_clamped = clamp(pos, vec2f(0.5), dims - vec2f(0.5));
@@ -94,9 +116,7 @@ fn sample_history_bilinear(pos: vec2f) -> vec3f {
   let c01 = textureLoad(history_color, clamp(p0 + vec2i(0, 1), vec2i(0), vec2i(dims) - 1), 0).rgb;
   let c11 = textureLoad(history_color, clamp(p0 + vec2i(1, 1), vec2i(0), vec2i(dims) - 1), 0).rgb;
 
-  let c0 = mix(c00, c10, f.x);
-  let c1 = mix(c01, c11, f.x);
-  return mix(c0, c1, f.y);
+  return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
 fn sample_history_depth_bilinear(pos: vec2f) -> f32 {
@@ -111,10 +131,10 @@ fn sample_history_depth_bilinear(pos: vec2f) -> f32 {
   let d01 = textureLoad(history_depth, clamp(p0 + vec2i(0, 1), vec2i(0), vec2i(dims) - 1), 0).r;
   let d11 = textureLoad(history_depth, clamp(p0 + vec2i(1, 1), vec2i(0), vec2i(dims) - 1), 0).r;
 
-  let d0 = mix(d00, d10, f.x);
-  let d1 = mix(d01, d11, f.x);
-  return mix(d0, d1, f.y);
+  return mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
 }
+
+// --- Main ---
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3u) {
@@ -132,57 +152,78 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   let current_col = current_data.rgb;
   let current_variance = current_data.a;
   let depth = textureLoad(current_depth, pixel_coord, 0).r;
-  let normal = textureLoad(current_normal, pixel_coord, 0).rgb;
 
-  // If no hit (background), just output current colour
+  // No hit — pass through
   if (depth > 1e20) {
     textureStore(output, pixel_coord, vec4f(current_col, current_variance));
     return;
   }
 
-  var valid_history = true;
+  var valid_history = false;
   var history_col = vec3f(0.0);
 
-  // When camera is static, use exact pixel coordinates (no reprojection blur)
   if (params.static_frame_count > 0u) {
+    // --- Static camera: direct pixel lookup, no reprojection needed ---
     history_col = textureLoad(history_color, pixel_coord, 0).rgb;
     let prev_depth = textureLoad(history_depth, pixel_coord, 0).r;
     let depth_diff = abs(prev_depth - depth) / max(depth, 0.001);
     valid_history = depth_diff < params.depth_threshold;
   } else {
-    // Camera moving - reconstruct world position and reproject
+    // --- Moving camera: reconstruct and reproject ---
     let world_pos = reconstruct_world_pos(pixel, depth);
     let prev_pixel = reproject(world_pos);
 
-    // Check if reprojected position is on screen
     let on_screen = prev_pixel.x >= 0.0 && prev_pixel.x < params.screen_width &&
                     prev_pixel.y >= 0.0 && prev_pixel.y < params.screen_height;
 
-    valid_history = on_screen;
-
     if (on_screen) {
-      // Sample history with bilinear interpolation for sub-pixel accuracy
       history_col = sample_history_bilinear(prev_pixel);
-      let prev_depth = sample_history_depth_bilinear(prev_pixel);
 
-      // Disocclusion detection
-      let depth_diff = abs(prev_depth - depth) / max(depth, 0.001);
+      // Use expected depth in previous frame's space for proper comparison
+      let expected_depth = compute_expected_depth(world_pos);
+      let prev_depth = sample_history_depth_bilinear(prev_pixel);
+      let depth_diff = abs(prev_depth - expected_depth) / max(expected_depth, 0.001);
       valid_history = depth_diff < params.depth_threshold;
+
+      // Velocity rejection: large reprojection distance = less trustworthy
+      let velocity = length(prev_pixel - pixel);
+      if (velocity > 50.0) {
+        valid_history = false;
+      }
     }
   }
 
-  // Simple 1-frame blend: 50/50 current + previous, no accumulation
-  var blend = select(1.0, params.blend_factor, valid_history);
+  // --- Compute blend factor ---
+  var blend: f32;
+  if (!valid_history) {
+    // No usable history — use current frame only
+    blend = 1.0;
+  } else if (params.static_frame_count > 0u) {
+    // Static camera: true 1/N Monte Carlo accumulation
+    let accumulated = f32(params.static_frame_count + 1u);
+    blend = 1.0 / (accumulated + 1.0);
+  } else {
+    // Moving camera: conservative fixed blend
+    blend = params.moving_blend_factor;
+  }
 
-  // Neighbourhood clamp history to reduce ghosting when moving
-  let bounds = get_neighbourhood_bounds(pixel_coord);
-  let min_col = bounds[0];
-  let max_col = bounds[1];
-  let bounds_expand = 0.25;
-  let range = max_col - min_col;
-  let clamped_history = clamp(history_col, min_col - range * bounds_expand, max_col + range * bounds_expand);
+  // --- Neighbourhood clamp in YCoCg to reduce ghosting ---
+  if (valid_history && params.static_frame_count == 0u) {
+    let stats = get_neighbourhood_stats(pixel_coord);
+    let mean_ycocg = stats[0];
+    let stddev_ycocg = stats[1];
+    let sigma_scale = 1.25;
 
-  let result = mix(clamped_history, current_col, blend);
+    let history_ycocg = rgb_to_ycocg(history_col);
+    let clamped_ycocg = clamp(
+      history_ycocg,
+      mean_ycocg - stddev_ycocg * sigma_scale,
+      mean_ycocg + stddev_ycocg * sigma_scale
+    );
+    history_col = ycocg_to_rgb(clamped_ycocg);
+  }
+
+  let result = mix(history_col, current_col, blend);
 
   // Pass through variance for denoise stage
   textureStore(output, pixel_coord, vec4f(result, current_variance));
