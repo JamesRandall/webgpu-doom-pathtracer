@@ -140,4 +140,6 @@ src/
 
 ## License
 
-MIT
+The code here is MIT license.
+
+However the Doom shareware WAD is included and copyright remains with the holders.
