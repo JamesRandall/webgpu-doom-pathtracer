@@ -166,8 +166,8 @@ async function main() {
   let phantomTriangles = createPhantomTrianglesAt(phantomX, phantomZ, phantomMats.indices);
 
   // --- Scene switching ---
-  let activeScene: ActiveScene = 'dungeon';
-  let currentCamera: { update(dt: number): void; getCamera(): Camera; attach(c: HTMLCanvasElement): void } = dungeonCameraController;
+  let activeScene: ActiveScene = 'doom';
+  let currentCamera: { update(dt: number): void; getCamera(): Camera; attach(c: HTMLCanvasElement): void } = doomCameraController;
 
   function getActiveSceneData(): { scene: SceneData; atlas: TextureAtlas | null } {
     if (activeScene === 'dungeon') {
@@ -179,13 +179,10 @@ async function main() {
   // Attach both controllers for input, but only the active one will be updated
   doomCameraController.attach(canvas);
   dungeonCameraController.attach(canvas);
-  dungeonCameraController.active = true;
+  dungeonCameraController.active = false;
 
   let { scene, atlas } = getActiveSceneData();
   let renderer = new Renderer(device, context, format, canvas.width, canvas.height, currentCamera.getCamera(), scene.triangles, scene.materials, atlas, scene.walkablePositions);
-  if (activeScene === 'dungeon') {
-    renderer.renderDistance = parseInt((document.getElementById('render-dist') as HTMLInputElement).value) * TILE_SIZE;
-  }
   await renderer.initialize();
 
   // UI Controls
@@ -215,6 +212,8 @@ async function main() {
   // Set initial values from renderer
   samplesSlider.value = String(renderer.samplesPerPixel);
   samplesValue.textContent = String(renderer.samplesPerPixel);
+  bouncesSlider.value = String(renderer.maxBounces);
+  bouncesValue.textContent = String(renderer.maxBounces);
   resolutionSelect.value = String(Renderer.RESOLUTION_SCALE);
   temporalSlider.value = String(renderer.temporalFrames);
   temporalValue.textContent = String(renderer.temporalFrames);
@@ -352,15 +351,18 @@ async function main() {
   }
   phantomCheckbox.addEventListener('change', applyPhantom);
 
-  // Apply initial dungeon settings
-  if (activeScene === 'dungeon') {
-    const showDungeon = '';
+  // Apply initial scene-specific settings
+  {
+    const showDungeon = activeScene === 'dungeon' ? '' : 'none';
     playerLightLabel.style.display = showDungeon;
     playerFalloffLabel.style.display = showDungeon;
     renderDistLabel.style.display = showDungeon;
     phantomLabel.style.display = showDungeon;
-    applyPhantom();
-    applyPlayerLight();
+    if (activeScene === 'dungeon') {
+      renderer.renderDistance = parseInt(renderDistSlider.value) * TILE_SIZE;
+      applyPhantom();
+      applyPlayerLight();
+    }
   }
 
   let lastTime = performance.now();
