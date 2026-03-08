@@ -149,6 +149,30 @@
         <input type="range" id="denoise" min="1" max="5" value="1" step="1">
         <span class="value" id="denoise-value">3</span>
       </label>
+      <label>
+        <span>Debug BVH</span>
+        <select id="debug-mode">
+          <option value="0" selected>Off</option>
+          <option value="1">Traversal</option>
+          <option value="2">Depth</option>
+          <option value="3">Leaf count</option>
+          <option value="4">Wireframe</option>
+        </select>
+      </label>
+      <label id="debug-opacity-label" style="display: none;">
+        <span>Debug opacity</span>
+        <input type="range" id="debug-opacity" min="0" max="100" value="100" step="5">
+        <span class="value" id="debug-opacity-value">100%</span>
+      </label>
+      <label id="debug-window-label" style="display: none;">
+        <span>Window mode</span>
+        <input type="checkbox" id="debug-window">
+      </label>
+      <label id="debug-depth-label" style="display: none;">
+        <span>BVH depth</span>
+        <input type="range" id="debug-depth" min="0" max="20" value="3" step="1">
+        <span class="value" id="debug-depth-value">3</span>
+      </label>
       <label id="player-light-label" style="display: none;">
         <span>Player torch</span>
         <input type="range" id="player-light" min="0" max="20" value="17" step="1">

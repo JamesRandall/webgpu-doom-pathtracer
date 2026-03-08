@@ -80,6 +80,12 @@ export class Renderer {
   public samplesPerPixel = 4;
   public maxBounces = 3;
 
+  // Debug visualisation
+  public debugMode: number = 0;      // 0=off, 1=traversal heat, 2=depth, 3=leaf count, 4=wireframe
+  public debugDepth: number = 3;     // BVH depth for wireframe mode
+  public debugOpacity: number = 1.0; // 0.0=scene only, 1.0=debug only
+  public debugWindow: number = 0;    // 0=fullscreen, 1=top-left window
+
   // Player light (emissive sphere at camera position)
   public playerLightColor = { x: 0, y: 0, z: 0 };
   public playerLightRadius = 0;
@@ -324,7 +330,7 @@ export class Renderer {
 
     // Create scene info buffer
     this.sceneInfoBuffer = this.device.createBuffer({
-      size: 96,
+      size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -939,7 +945,7 @@ export class Renderer {
   }
 
   private updateSceneInfoBuffer(): void {
-    const buffer = new ArrayBuffer(96);
+    const buffer = new ArrayBuffer(112);
     const u32View = new Uint32Array(buffer);
     const f32View = new Float32Array(buffer);
 
@@ -960,17 +966,21 @@ export class Renderer {
     u32View[12] = this.dynamicTriOffset;
     u32View[13] = this.dynamicTriangles.length;
     u32View[14] = this.lightCount;
-    u32View[15] = 0;
+    u32View[15] = this.debugMode;
 
     // Dynamic triangle AABB for early-out
     f32View[16] = this.dynamicAABBMin.x;
     f32View[17] = this.dynamicAABBMin.y;
     f32View[18] = this.dynamicAABBMin.z;
-    f32View[19] = 0; // pad
+    f32View[19] = this.debugOpacity;
     f32View[20] = this.dynamicAABBMax.x;
     f32View[21] = this.dynamicAABBMax.y;
     f32View[22] = this.dynamicAABBMax.z;
-    f32View[23] = 0; // pad
+    u32View[23] = this.debugDepth;
+    u32View[24] = this.debugWindow;
+    u32View[25] = 0;
+    u32View[26] = 0;
+    u32View[27] = 0;
 
     this.device.queue.writeBuffer(this.sceneInfoBuffer, 0, buffer);
   }

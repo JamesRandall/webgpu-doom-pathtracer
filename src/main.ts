@@ -166,7 +166,7 @@ async function main() {
   let phantomTriangles = createPhantomTrianglesAt(phantomX, phantomZ, phantomMats.indices);
 
   // --- Scene switching ---
-  let activeScene: ActiveScene = 'doom';
+  let activeScene = 'doom' as ActiveScene;
   let currentCamera: { update(dt: number): void; getCamera(): Camera; attach(c: HTMLCanvasElement): void } = doomCameraController;
 
   function getActiveSceneData(): { scene: SceneData; atlas: TextureAtlas | null } {
@@ -208,6 +208,15 @@ async function main() {
   const renderDistLabel = document.getElementById('render-dist-label') as HTMLLabelElement;
   const phantomCheckbox = document.getElementById('phantom') as HTMLInputElement;
   const phantomLabel = document.getElementById('phantom-label') as HTMLLabelElement;
+  const debugModeSelect = document.getElementById('debug-mode') as HTMLSelectElement;
+  const debugOpacitySlider = document.getElementById('debug-opacity') as HTMLInputElement;
+  const debugOpacityValue = document.getElementById('debug-opacity-value') as HTMLSpanElement;
+  const debugOpacityLabel = document.getElementById('debug-opacity-label') as HTMLLabelElement;
+  const debugWindowCheckbox = document.getElementById('debug-window') as HTMLInputElement;
+  const debugWindowLabel = document.getElementById('debug-window-label') as HTMLLabelElement;
+  const debugDepthSlider = document.getElementById('debug-depth') as HTMLInputElement;
+  const debugDepthValue = document.getElementById('debug-depth-value') as HTMLSpanElement;
+  const debugDepthLabel = document.getElementById('debug-depth-label') as HTMLLabelElement;
 
   // Set initial values from renderer
   samplesSlider.value = String(renderer.samplesPerPixel);
@@ -255,6 +264,10 @@ async function main() {
     renderer.samplesPerPixel = parseInt(samplesSlider.value);
     renderer.maxBounces = parseInt(bouncesSlider.value);
     renderer.temporalFrames = parseInt(temporalSlider.value);
+    renderer.debugMode = parseInt(debugModeSelect.value);
+    renderer.debugDepth = parseInt(debugDepthSlider.value);
+    renderer.debugOpacity = parseInt(debugOpacitySlider.value) / 100;
+    renderer.debugWindow = debugWindowCheckbox.checked ? 1 : 0;
     applyDenoise();
     const showDungeon = activeScene === 'dungeon' ? '' : 'none';
     playerLightLabel.style.display = showDungeon;
@@ -311,6 +324,29 @@ async function main() {
   denoiseSlider.addEventListener('input', () => {
     renderer.denoisePasses = parseInt(denoiseSlider.value);
     denoiseValue.textContent = String(denoiseSlider.value);
+  });
+
+  // Debug BVH visualisation
+  function updateDebugVisibility() {
+    const active = renderer.debugMode > 0;
+    debugOpacityLabel.style.display = active ? '' : 'none';
+    debugWindowLabel.style.display = active ? '' : 'none';
+    debugDepthLabel.style.display = renderer.debugMode === 4 ? '' : 'none';
+  }
+  debugModeSelect.addEventListener('change', () => {
+    renderer.debugMode = parseInt(debugModeSelect.value);
+    updateDebugVisibility();
+  });
+  debugOpacitySlider.addEventListener('input', () => {
+    renderer.debugOpacity = parseInt(debugOpacitySlider.value) / 100;
+    debugOpacityValue.textContent = debugOpacitySlider.value + '%';
+  });
+  debugWindowCheckbox.addEventListener('change', () => {
+    renderer.debugWindow = debugWindowCheckbox.checked ? 1 : 0;
+  });
+  debugDepthSlider.addEventListener('input', () => {
+    renderer.debugDepth = parseInt(debugDepthSlider.value);
+    debugDepthValue.textContent = debugDepthSlider.value;
   });
 
   // Player torch light intensity and size

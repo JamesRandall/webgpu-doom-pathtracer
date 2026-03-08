@@ -72,11 +72,15 @@ struct SceneInfo {
   dynamic_tri_offset: u32,
   dynamic_tri_count: u32,
   light_count: u32,
-  _pad1: u32,
+  debug_mode: u32,
   dynamic_aabb_min: vec3f,
-  _pad2: f32,
+  debug_opacity: f32,
   dynamic_aabb_max: vec3f,
-  _pad3: f32,
+  debug_depth: u32,
+  debug_window: u32,
+  _pad4: u32,
+  _pad5: u32,
+  _pad6: u32,
 }
 
 struct HitInfo {
@@ -578,6 +582,196 @@ fn generate_ray(pixel: vec2f) -> vec3f {
   return normalize(forward + right * ndc.x + up * ndc.y);
 }
 
+// --- Debug visualisation ---
+
+fn heatmap(value: f32, max_value: f32) -> vec3f {
+  let t = clamp(value / max_value, 0.0, 1.0);
+  if (t < 0.25) {
+    let s = t / 0.25;
+    return vec3f(0.0, s, 1.0);
+  } else if (t < 0.5) {
+    let s = (t - 0.25) / 0.25;
+    return vec3f(0.0, 1.0, 1.0 - s);
+  } else if (t < 0.75) {
+    let s = (t - 0.5) / 0.25;
+    return vec3f(s, 1.0, 0.0);
+  } else {
+    let s = (t - 0.75) / 0.25;
+    return vec3f(1.0, 1.0 - s, 0.0);
+  }
+}
+
+struct DebugHitInfo {
+  hit: HitInfo,
+  nodes_visited: u32,
+  leaf_depth: u32,
+  leaf_tri_count: u32,
+}
+
+fn trace_bvh_debug(ray_origin: vec3f, ray_dir: vec3f) -> DebugHitInfo {
+  var result: DebugHitInfo;
+  result.nodes_visited = 0u;
+  result.leaf_depth = 0u;
+  result.leaf_tri_count = 0u;
+  result.hit.t = 1e30;
+  result.hit.hit = false;
+  result.hit.is_player_light = false;
+  result.hit.tri_index = 0u;
+  result.hit.bary_u = 0.0;
+  result.hit.bary_v = 0.0;
+
+  let ray_dir_inv = 1.0 / ray_dir;
+
+  var stack: array<u32, MAX_STACK_SIZE>;
+  var depth_stack: array<u32, MAX_STACK_SIZE>;
+  var stack_ptr = 0u;
+
+  stack[0] = 0u;
+  depth_stack[0] = 0u;
+  stack_ptr = 1u;
+
+  while (stack_ptr > 0u) {
+    stack_ptr -= 1u;
+    let node_idx = stack[stack_ptr];
+    let current_depth = depth_stack[stack_ptr];
+    let node = bvh_nodes[node_idx];
+
+    result.nodes_visited += 1u;
+
+    if (!intersect_aabb(ray_origin, ray_dir_inv, node.min_bounds, node.max_bounds, result.hit.t)) {
+      continue;
+    }
+
+    if (is_leaf(node)) {
+      let tri_count = get_tri_count(node);
+      let first_tri = node.left_child_or_first_tri;
+
+      for (var i = 0u; i < tri_count; i++) {
+        let tri_idx = first_tri + i;
+        let verts = tri_verts[tri_idx];
+        let hit_result = intersect_triangle_uv(ray_origin, ray_dir, verts.v0, verts.v1, verts.v2);
+
+        if (hit_result.t > 0.0 && hit_result.t < result.hit.t) {
+          result.hit.t = hit_result.t;
+          result.hit.hit = true;
+          result.hit.tri_index = tri_idx;
+          result.hit.bary_u = hit_result.u;
+          result.hit.bary_v = hit_result.v;
+          result.leaf_depth = current_depth;
+          result.leaf_tri_count = tri_count;
+        }
+      }
+    } else {
+      let left_child = node.left_child_or_first_tri;
+      let right_child = node.right_child_or_count;
+
+      if (stack_ptr < MAX_STACK_SIZE - 1u) {
+        stack[stack_ptr] = left_child;
+        depth_stack[stack_ptr] = current_depth + 1u;
+        stack_ptr += 1u;
+        stack[stack_ptr] = right_child;
+        depth_stack[stack_ptr] = current_depth + 1u;
+        stack_ptr += 1u;
+      }
+    }
+  }
+
+  return result;
+}
+
+fn trace_aabb_wireframe(ray_origin: vec3f, ray_dir: vec3f, target_depth: u32) -> f32 {
+  let ray_dir_inv = 1.0 / ray_dir;
+
+  var stack: array<u32, MAX_STACK_SIZE>;
+  var depth_stack: array<u32, MAX_STACK_SIZE>;
+  var stack_ptr = 0u;
+  var wireframe = 0.0;
+
+  stack[0] = 0u;
+  depth_stack[0] = 0u;
+  stack_ptr = 1u;
+
+  while (stack_ptr > 0u) {
+    stack_ptr -= 1u;
+    let node_idx = stack[stack_ptr];
+    let current_depth = depth_stack[stack_ptr];
+    let node = bvh_nodes[node_idx];
+
+    let t_vals = intersect_aabb_t(ray_origin, ray_dir_inv, node.min_bounds, node.max_bounds);
+    let hit_aabb = t_vals.y >= t_vals.x && t_vals.y > 0.0;
+
+    if (!hit_aabb) { continue; }
+
+    if (current_depth == target_depth) {
+      let t_enter = max(t_vals.x, 0.001);
+      let hit_point = ray_origin + ray_dir * t_enter;
+      let box_size = node.max_bounds - node.min_bounds;
+      let local = (hit_point - node.min_bounds) / max(box_size, vec3f(0.001));
+
+      let edge_threshold = 0.02;
+      let near_x = local.x < edge_threshold || local.x > (1.0 - edge_threshold);
+      let near_y = local.y < edge_threshold || local.y > (1.0 - edge_threshold);
+      let near_z = local.z < edge_threshold || local.z > (1.0 - edge_threshold);
+
+      if ((near_x && near_y) || (near_x && near_z) || (near_y && near_z)) {
+        wireframe = 1.0;
+      }
+      continue;
+    }
+
+    if (!is_leaf(node) && current_depth < target_depth) {
+      let left_child = node.left_child_or_first_tri;
+      let right_child = node.right_child_or_count;
+
+      if (stack_ptr < MAX_STACK_SIZE - 1u) {
+        stack[stack_ptr] = left_child;
+        depth_stack[stack_ptr] = current_depth + 1u;
+        stack_ptr += 1u;
+        stack[stack_ptr] = right_child;
+        depth_stack[stack_ptr] = current_depth + 1u;
+        stack_ptr += 1u;
+      }
+    }
+  }
+
+  return wireframe;
+}
+
+fn compute_debug_color(ray_origin: vec3f, ray_dir: vec3f) -> vec3f {
+  var debug_color = vec3f(0.0);
+
+  if (scene_info.debug_mode == 1u) {
+    let debug_hit = trace_bvh_debug(ray_origin, ray_dir);
+    if (debug_hit.hit.hit) {
+      debug_color = heatmap(f32(debug_hit.nodes_visited), 100.0);
+    }
+  } else if (scene_info.debug_mode == 2u) {
+    let debug_hit = trace_bvh_debug(ray_origin, ray_dir);
+    if (debug_hit.hit.hit) {
+      debug_color = heatmap(f32(debug_hit.leaf_depth), 20.0);
+    }
+  } else if (scene_info.debug_mode == 3u) {
+    let debug_hit = trace_bvh_debug(ray_origin, ray_dir);
+    if (debug_hit.hit.hit) {
+      debug_color = heatmap(f32(debug_hit.leaf_tri_count), 16.0);
+    }
+  } else if (scene_info.debug_mode == 4u) {
+    let debug_hit = trace_bvh_debug(ray_origin, ray_dir);
+    var base_color = vec3f(0.0);
+    if (debug_hit.hit.hit) {
+      let hit = resolve_hit(debug_hit.hit);
+      var n = hit.normal;
+      if (dot(ray_dir, n) > 0.0) { n = -n; }
+      let ndl = max(dot(n, normalize(vec3f(1.0, 1.0, -1.0))), 0.1);
+      base_color = vec3f(ndl * 0.7);
+    }
+    let wire = trace_aabb_wireframe(ray_origin, ray_dir, scene_info.debug_depth);
+    debug_color = mix(base_color, vec3f(0.0, 1.0, 0.0), wire);
+  }
+
+  return debug_color;
+}
+
 // Path trace a single ray, optionally outputting primary hit info for G-buffer
 fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, u32>, out_normal: ptr<function, vec3f>, out_depth: ptr<function, f32>) -> vec3f {
   var ray_origin = ray_origin_in;
@@ -775,6 +969,40 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
     return;
   }
 
+  // --- Debug visualisation modes ---
+  // Window mode: debug only in top-left quarter; fullscreen: debug everywhere
+  let debug_active = scene_info.debug_mode > 0u;
+  let window_size = vec2u(dims.x / 3u, dims.y / 3u);
+  let in_debug_window = scene_info.debug_window > 0u
+    && global_id.x < window_size.x && global_id.y < window_size.y;
+  let is_debug_pixel = debug_active && (scene_info.debug_window == 0u || in_debug_window);
+  let is_window_border = debug_active && scene_info.debug_window > 0u
+    && (global_id.x == window_size.x || global_id.y == window_size.y)
+    && global_id.x <= window_size.x && global_id.y <= window_size.y;
+
+  if (is_debug_pixel && scene_info.debug_opacity >= 1.0) {
+    // Fully opaque debug — skip path tracing entirely (fast path)
+    var debug_pixel = vec2f(f32(global_id.x) + 0.5, f32(global_id.y) + 0.5);
+    if (scene_info.debug_window > 0u) {
+      // Scale pixel coords so full scene fits in window
+      debug_pixel = debug_pixel * vec2f(f32(dims.x), f32(dims.y)) / vec2f(f32(window_size.x), f32(window_size.y));
+    }
+    let ray_origin = camera.position;
+    let ray_dir = generate_ray(debug_pixel);
+    let debug_color = compute_debug_color(ray_origin, ray_dir);
+
+    textureStore(output, global_id.xy, vec4f(debug_color, 0.0));
+    textureStore(output_normal, global_id.xy, vec4f(0.0, 1.0, 0.0, 1.0));
+    textureStore(output_depth, global_id.xy, vec4f(1e30, 0.0, 0.0, 0.0));
+    return;
+  }
+  if (is_window_border) {
+    textureStore(output, global_id.xy, vec4f(1.0, 1.0, 1.0, 0.0));
+    textureStore(output_normal, global_id.xy, vec4f(0.0, 1.0, 0.0, 1.0));
+    textureStore(output_depth, global_id.xy, vec4f(1e30, 0.0, 0.0, 0.0));
+    return;
+  }
+
   // Initialize RNG
   var rng_state = rand_seed(global_id.xy, scene_info.frame);
 
@@ -820,6 +1048,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   // Write G-buffer
   textureStore(output_normal, global_id.xy, vec4f(primary_normal, 1.0));
   textureStore(output_depth, global_id.xy, vec4f(primary_depth, 0.0, 0.0, 0.0));
+
+  // Blend debug overlay if active with opacity < 1.0
+  if (is_debug_pixel && scene_info.debug_opacity < 1.0) {
+    var dbg_pixel = vec2f(f32(global_id.x) + 0.5, f32(global_id.y) + 0.5);
+    if (scene_info.debug_window > 0u) {
+      dbg_pixel = dbg_pixel * vec2f(f32(dims.x), f32(dims.y)) / vec2f(f32(window_size.x), f32(window_size.y));
+    }
+    let debug_color = compute_debug_color(camera.position, generate_ray(dbg_pixel));
+    color = mix(color, debug_color, scene_info.debug_opacity);
+  }
 
   // Output averaged sample with variance in alpha
   textureStore(output, global_id.xy, vec4f(color, lum_variance));
