@@ -51,6 +51,7 @@ export class Renderer {
   private cameraBuffer!: GPUBuffer;
   private triangleBuffer!: GPUBuffer;
   private triAttribsBuffer!: GPUBuffer;
+  private lightsBuffer!: GPUBuffer;
   private materialBuffer!: GPUBuffer;
   private bvhBuffer!: GPUBuffer;
   private sceneInfoBuffer!: GPUBuffer;
@@ -89,7 +90,7 @@ export class Renderer {
   private allTriangles: Triangle[] = [];
 
   // Precomputed BVH per tile position
-  private precomputedBVHs: Map<string, { bvhData: ArrayBuffer; triVertsData: Float32Array; triAttribsData: Float32Array; nodeCount: number; triCount: number }> = new Map();
+  private precomputedBVHs: Map<string, { bvhData: ArrayBuffer; triVertsData: Float32Array; triAttribsData: Float32Array; lightData: Float32Array; nodeCount: number; triCount: number; lightCount: number }> = new Map();
   private currentTileKey: string = '';
 
   // Dynamic (non-BVH) triangles — e.g. monsters, items
@@ -97,6 +98,8 @@ export class Renderer {
   private dynamicTriOffset: number = 0;
   private dynamicAABBMin = { x: 0, y: 0, z: 0 };
   private dynamicAABBMax = { x: 0, y: 0, z: 0 };
+  private lightCount: number = 0;
+
   constructor(
     device: GPUDevice,
     context: GPUCanvasContext,
@@ -267,13 +270,18 @@ export class Renderer {
       size: Math.max(maxAttribBytes, 32),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    // Upload initial data
+    // Upload initial data and build light lists
+    let maxLightBytes = 8;
     if (this.precomputedBVHs.size > 0) {
       const first = this.precomputedBVHs.get(this.currentTileKey)!;
       this.device.queue.writeBuffer(this.triangleBuffer, 0, first.triVertsData.buffer);
       this.device.queue.writeBuffer(this.triAttribsBuffer, 0, first.triAttribsData.buffer);
       this.triangleCount = first.triCount;
       this.dynamicTriOffset = first.triCount;
+      this.lightCount = first.lightCount;
+      for (const entry of this.precomputedBVHs.values()) {
+        maxLightBytes = Math.max(maxLightBytes, entry.lightData.byteLength);
+      }
     } else {
       const vertsData = packTriangleVerts(orderedTriangles);
       const attribsData = packTriangleAttribs(orderedTriangles);
@@ -282,6 +290,21 @@ export class Renderer {
       this.triangleCount = orderedTriangles.length;
       this.dynamicTriOffset = orderedTriangles.length;
     }
+
+    // Create lights storage buffer (MIS — emissive triangle list)
+    const initialLightData = this.precomputedBVHs.size > 0
+      ? this.precomputedBVHs.get(this.currentTileKey)!.lightData
+      : this.buildLightList(orderedTriangles);
+    if (this.precomputedBVHs.size === 0) {
+      this.lightCount = initialLightData.length / 2;
+      maxLightBytes = Math.max(initialLightData.byteLength, 8);
+    }
+    this.lightsBuffer = this.device.createBuffer({
+      size: Math.max(maxLightBytes, 8),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(this.lightsBuffer, 0, initialLightData.buffer);
+    console.log(`Lights: ${this.lightCount} emissive triangles`);
 
     // Create material storage buffer
     const materialData = packMaterials(this.materials);
@@ -453,6 +476,11 @@ export class Renderer {
           visibility: GPUShaderStage.COMPUTE,
           buffer: { type: 'read-only-storage' },
         },
+        {
+          binding: 12,
+          visibility: GPUShaderStage.COMPUTE,
+          buffer: { type: 'read-only-storage' },
+        },
       ],
     });
 
@@ -517,6 +545,10 @@ export class Renderer {
         {
           binding: 11,
           resource: { buffer: this.triAttribsBuffer },
+        },
+        {
+          binding: 12,
+          resource: { buffer: this.lightsBuffer },
         },
       ],
     });
@@ -818,14 +850,17 @@ export class Renderer {
       const bvhData = packBVHNodes(flat);
       const triVertsData = packTriangleVerts(orderedTriangles);
       const triAttribsData = packTriangleAttribs(orderedTriangles);
+      const lightData = this.buildLightList(orderedTriangles);
 
       const key = `${pos.x},${pos.z}`;
       this.precomputedBVHs.set(key, {
         bvhData,
         triVertsData,
         triAttribsData,
+        lightData,
         nodeCount: nodes.length,
         triCount: orderedTriangles.length,
+        lightCount: lightData.length / 2,
       });
 
       maxTris = Math.max(maxTris, orderedTriangles.length);
@@ -860,19 +895,47 @@ export class Renderer {
     const entry = this.precomputedBVHs.get(bestKey);
     if (!entry) return;
 
-    // Upload this tile's BVH and triangles (verts + attribs)
+    // Upload this tile's BVH, triangles (verts + attribs), and light list
     this.device.queue.writeBuffer(this.bvhBuffer, 0, entry.bvhData);
     this.device.queue.writeBuffer(this.triangleBuffer, 0, entry.triVertsData.buffer);
     this.device.queue.writeBuffer(this.triAttribsBuffer, 0, entry.triAttribsData.buffer);
+    this.device.queue.writeBuffer(this.lightsBuffer, 0, entry.lightData.buffer);
     this.nodeCount = entry.nodeCount;
     this.triangleCount = entry.triCount;
     this.dynamicTriOffset = entry.triCount;
+    this.lightCount = entry.lightCount;
     this.currentTileKey = bestKey;
 
     // Re-upload dynamic triangles after static ones
     if (this.dynamicTriangles.length > 0) {
       this.setDynamicTriangles(this.dynamicTriangles);
     }
+  }
+
+  private buildLightList(orderedTriangles: Triangle[]): Float32Array {
+    const entries: { triIndex: number; area: number }[] = [];
+    for (let i = 0; i < orderedTriangles.length; i++) {
+      const mat = this.materials[orderedTriangles[i].materialIndex];
+      if (mat.emissive.x > 0 || mat.emissive.y > 0 || mat.emissive.z > 0) {
+        const t = orderedTriangles[i];
+        const e1x = t.v1.x - t.v0.x, e1y = t.v1.y - t.v0.y, e1z = t.v1.z - t.v0.z;
+        const e2x = t.v2.x - t.v0.x, e2y = t.v2.y - t.v0.y, e2z = t.v2.z - t.v0.z;
+        const cx = e1y * e2z - e1z * e2y, cy = e1z * e2x - e1x * e2z, cz = e1x * e2y - e1y * e2x;
+        const area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+        if (area > 0) {
+          entries.push({ triIndex: i, area });
+        }
+      }
+    }
+    // Pack as [triIndex(u32), area(f32)] pairs
+    const buffer = new ArrayBuffer(Math.max(entries.length * 8, 8));
+    const u32 = new Uint32Array(buffer);
+    const f32 = new Float32Array(buffer);
+    for (let i = 0; i < entries.length; i++) {
+      u32[i * 2] = entries[i].triIndex;
+      f32[i * 2 + 1] = entries[i].area;
+    }
+    return f32;
   }
 
   private updateSceneInfoBuffer(): void {
@@ -896,7 +959,7 @@ export class Renderer {
 
     u32View[12] = this.dynamicTriOffset;
     u32View[13] = this.dynamicTriangles.length;
-    u32View[14] = 0;
+    u32View[14] = this.lightCount;
     u32View[15] = 0;
 
     // Dynamic triangle AABB for early-out

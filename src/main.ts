@@ -67,7 +67,7 @@ async function main() {
 
     setTextureAtlas(doomTextureAtlas);
 
-    const levelData = wad.parseLevel('E1M2');
+    const levelData = wad.parseLevel('E1M1');
     doomScene = convertLevelToScene(levelData);
 
     const playerStart = levelData.things.find(t => t.type === 1);

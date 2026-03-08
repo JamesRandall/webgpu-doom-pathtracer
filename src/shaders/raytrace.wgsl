@@ -71,7 +71,7 @@ struct SceneInfo {
   player_light_radius: f32,
   dynamic_tri_offset: u32,
   dynamic_tri_count: u32,
-  _pad0: u32,
+  light_count: u32,
   _pad1: u32,
   dynamic_aabb_min: vec3f,
   _pad2: f32,
@@ -111,6 +111,13 @@ struct ResolvedHit {
 @group(0) @binding(10) var<storage, read> atlas_entries: array<AtlasEntry>;
 @group(0) @binding(11) var<storage, read> tri_attribs: array<TriangleAttribs>;
 
+struct LightInfo {
+  tri_index: u32,
+  area: f32,
+}
+
+@group(0) @binding(12) var<storage, read> lights: array<LightInfo>;
+
 const MAX_STACK_SIZE = 32u;
 const LEAF_FLAG = 0x80000000u;
 
@@ -146,6 +153,13 @@ fn cosine_hemisphere(normal: vec3f, r1: f32, r2: f32) -> vec3f {
   let bitangent = cross(normal, tangent);
 
   return tangent * x + bitangent * y + normal * z;
+}
+
+fn sample_triangle_point(v0: vec3f, v1: vec3f, v2: vec3f, r1: f32, r2: f32) -> vec3f {
+  let sqrt_r1 = sqrt(r1);
+  let u = 1.0 - sqrt_r1;
+  let v = r2 * sqrt_r1;
+  return v0 * u + v1 * v + v2 * (1.0 - u - v);
 }
 
 // Build orthonormal basis from normal
@@ -570,6 +584,8 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
   var ray_dir = ray_dir_in;
   var throughput = vec3f(1.0);
   var radiance = vec3f(0.0);
+  var last_bsdf_pdf = 0.0;
+  var last_was_specular = true;
 
   for (var bounce = 0u; bounce < scene_info.max_bounces; bounce++) {
     let raw_hit = trace_scene(ray_origin, ray_dir, bounce);
@@ -619,11 +635,24 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       surface_color = mat.albedo;
     }
 
-    // Handle emissive surfaces
-    radiance += throughput * mat.emissive;
+    // Handle emissive surfaces with MIS weighting
     if (mat.material_type == MATERIAL_EMISSIVE) {
+      var w = 1.0;
+      // Apply MIS weight for BSDF-sampled diffuse bounces that hit a light
+      if (!last_was_specular && scene_info.light_count > 0u && bounce > 0u) {
+        let ev = tri_verts[raw_hit.tri_index];
+        let e1 = ev.v1 - ev.v0;
+        let e2 = ev.v2 - ev.v0;
+        let tri_area = 0.5 * length(cross(e1, e2));
+        let cos_light = max(abs(dot(hit.normal, -ray_dir)), 0.001);
+        let p_light = (hit.t * hit.t) / (f32(scene_info.light_count) * tri_area * max(cos_light, 0.001));
+        let p_bsdf = last_bsdf_pdf;
+        w = p_bsdf / (0.5 * (p_bsdf + p_light));
+      }
+      radiance += throughput * mat.emissive * w;
       break;
     }
+    radiance += throughput * mat.emissive;
 
     // Calculate hit position
     let hit_pos = ray_origin + ray_dir * hit.t;
@@ -680,16 +709,49 @@ fn path_trace(ray_origin_in: vec3f, ray_dir_in: vec3f, rng_state: ptr<function, 
       }
 
       ray_origin = hit_pos + normal * 0.001;
+      last_was_specular = true;
     } else {
-      // Diffuse material (MATERIAL_DIFFUSE)
+      // Diffuse material with MIS (light sampling + BSDF sampling)
       throughput *= surface_color;
-
       ray_origin = hit_pos + normal * 0.001;
+      last_was_specular = false;
 
-      // Sample new direction (cosine-weighted hemisphere)
       let r1 = pcg(rng_state);
       let r2 = pcg(rng_state);
-      ray_dir = cosine_hemisphere(normal, r1, r2);
+      var use_light_dir = false;
+
+      if (scene_info.light_count > 0u && pcg(rng_state) < 0.5) {
+        // Light-directed sampling
+        let light_idx = min(u32(pcg(rng_state) * f32(scene_info.light_count)), scene_info.light_count - 1u);
+        let light = lights[light_idx];
+        let lv = tri_verts[light.tri_index];
+        let la = tri_attribs[light.tri_index];
+        let light_point = sample_triangle_point(lv.v0, lv.v1, lv.v2, r1, r2);
+
+        let to_light = light_point - ray_origin;
+        let dist_sq = dot(to_light, to_light);
+        let dist = sqrt(dist_sq);
+        let light_dir = to_light / dist;
+        let cos_theta = dot(normal, light_dir);
+        let cos_light = abs(dot(la.normal, -light_dir));
+
+        if (cos_theta > 0.0 && cos_light > 0.0) {
+          let p_light = dist_sq / (f32(scene_info.light_count) * light.area * max(cos_light, 0.001));
+          let p_bsdf = cos_theta / PI;
+          // One-sample MIS: throughput = (cos/PI) / (0.5*(p_light+p_bsdf))
+          throughput *= (cos_theta / PI) / (0.5 * (p_light + p_bsdf));
+          ray_dir = light_dir;
+          use_light_dir = true;
+          // Mark as light-sampled so emissive handler skips MIS weight (already applied)
+          last_was_specular = true;
+        }
+      }
+
+      if (!use_light_dir) {
+        // Standard cosine-weighted hemisphere
+        ray_dir = cosine_hemisphere(normal, r1, r2);
+        last_bsdf_pdf = max(dot(normal, ray_dir), 0.001) / PI;
+      }
     }
 
     // Russian roulette for path termination (after a few bounces)
