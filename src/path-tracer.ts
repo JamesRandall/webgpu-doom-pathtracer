@@ -83,12 +83,41 @@ const STYLES = `
     top: 1rem;
     right: 1rem;
     background: rgba(0, 0, 0, 0.8);
-    padding: 1rem;
     border-radius: 8px;
     color: white;
     font-size: 0.875rem;
     min-width: 220px;
+    transition: opacity 0.3s;
   }
+  #controls-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: rgba(0, 0, 0, 0.8);
+    border: none;
+    border-radius: 8px;
+    color: white;
+    cursor: pointer;
+    font-size: 1.1rem;
+    padding: 0;
+    margin: 0.5rem 0.5rem 0 auto;
+  }
+  #controls-toggle:hover { background: rgba(60, 60, 60, 0.9); }
+  #controls-body {
+    padding: 0 1rem 1rem;
+    overflow: hidden;
+    max-height: 800px;
+    transition: max-height 0.3s ease, padding 0.3s ease, opacity 0.2s ease;
+    opacity: 1;
+  }
+  #controls.collapsed #controls-body {
+    max-height: 0;
+    padding: 0 1rem;
+    opacity: 0;
+  }
+  #controls.collapsed { min-width: auto; }
   #controls label {
     display: flex;
     justify-content: space-between;
@@ -129,9 +158,13 @@ const STYLES = `
   #container.paused #controls {
     opacity: 0.3;
     pointer-events: none;
-    transition: opacity 0.3s;
   }
   #controls.hidden, #hint.hidden { display: none; }
+  @media (max-width: 600px) {
+    #controls { min-width: auto; font-size: 0.8rem; }
+    #controls input[type="range"] { width: 60px; }
+    #controls .value { min-width: 35px; }
+  }
   #play-overlay {
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
@@ -388,7 +421,7 @@ export class PathTracerElement extends HTMLElement {
           </div>
         </div>
         <div id="hint">Click to capture mouse | WASD to move | Q/E to rotate | Space/Shift for up/down | ESC to release</div>
-        ${showControls ? `<div id="controls">${CONTROLS_HTML}</div>` : ''}
+        ${showControls ? `<div id="controls"><button id="controls-toggle" title="Toggle controls (C)">&#9881;</button><div id="controls-body">${CONTROLS_HTML}</div></div>` : ''}
       </div>
     `;
     this.canvas = this.shadow.querySelector('canvas')!;
@@ -445,11 +478,20 @@ export class PathTracerElement extends HTMLElement {
       this.resume();
     });
 
+    // Controls toggle button
+    this.shadow.getElementById('controls-toggle')?.addEventListener('click', () => {
+      this.toggleControls();
+    });
+
+    // Auto-collapse on narrow screens
+    if (window.innerWidth <= 600) {
+      this.shadow.getElementById('controls')?.classList.add('collapsed');
+    }
+
     // Keyboard shortcuts
     window.addEventListener('keydown', (e) => {
       if (e.code === 'KeyC') {
-        this.shadow.getElementById('controls')?.classList.toggle('hidden');
-        this.shadow.getElementById('hint')?.classList.toggle('hidden');
+        this.toggleControls();
       } else if (e.code === 'Digit0') {
         this.pendingScreenshot = true;
       }
@@ -766,7 +808,14 @@ export class PathTracerElement extends HTMLElement {
     this.syncControl('temporal', this.renderer.temporalFrames, 'temporal-value');
 
     const resSelect = this.$<HTMLSelectElement>('resolution');
-    if (resSelect) resSelect.value = String(this.renderer.resolutionScale);
+    if (resSelect) {
+      // Match option values like "0.25", "0.5", "1.0" — find closest
+      const scale = this.renderer.resolutionScale;
+      const best = Array.from(resSelect.options).reduce((a, b) =>
+        Math.abs(parseFloat(a.value) - scale) <= Math.abs(parseFloat(b.value) - scale) ? a : b
+      );
+      resSelect.value = best.value;
+    }
 
     const denoiseSelect = this.$<HTMLSelectElement>('denoise-mode');
     if (denoiseSelect) denoiseSelect.value = this.renderer.denoisePasses === 0 ? 'off' : this.renderer.denoiseMode;
@@ -915,6 +964,21 @@ export class PathTracerElement extends HTMLElement {
   }
 
   // --- Pause / Play ---
+  private toggleControls() {
+    const controls = this.shadow.getElementById('controls');
+    const hint = this.shadow.getElementById('hint');
+    if (controls) {
+      const isHidden = controls.classList.contains('hidden');
+      if (isHidden) {
+        controls.classList.remove('hidden');
+        hint?.classList.remove('hidden');
+      } else {
+        controls.classList.toggle('collapsed');
+        hint?.classList.toggle('hidden');
+      }
+    }
+  }
+
   private pause() {
     if (this.paused) return;
     this.paused = true;

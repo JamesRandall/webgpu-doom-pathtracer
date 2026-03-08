@@ -134,6 +134,10 @@ export class Renderer {
   }
 
   async initialize(): Promise<void> {
+    // Recalculate render dimensions in case resolutionScale was changed after construction
+    this.renderWidth = Math.floor(this.canvasWidth * this.resolutionScale);
+    this.renderHeight = Math.floor(this.canvasHeight * this.resolutionScale);
+
     let orderedTriangles: Triangle[];
     let bvhData: ArrayBuffer;
     this.allTriangles = this.triangles;
