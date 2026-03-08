@@ -27,7 +27,7 @@ export class Renderer {
   private walkablePositions: { x: number; z: number }[] | undefined;
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
-  public static RESOLUTION_SCALE = 0.5;
+  public static RESOLUTION_SCALE = 1.0;
   private static readonly MAX_DENOISE_PASSES = 5;
   private frameCount: number = 0;
   private nodeCount: number = 0;
@@ -70,14 +70,14 @@ export class Renderer {
   private staticFrameCount: number = 0;
 
   // Denoise settings
-  public denoisePasses = 3; // 0 = off, 1-5 = number of passes
+  public denoisePasses = 1; // 0 = off, 1-5 = number of passes
   public denoiseMode: 'atrous' | 'median' | 'adaptive' = 'atrous'; // algorithm
 
   // Post-processing options (public for UI control)
   public temporalFrames = 1;  // 0 = off, 1+ = enabled
 
   public samplesPerPixel = 4;
-  public maxBounces = 4;
+  public maxBounces = 3;
 
   // Player light (emissive sphere at camera position)
   public playerLightColor = { x: 0, y: 0, z: 0 };
