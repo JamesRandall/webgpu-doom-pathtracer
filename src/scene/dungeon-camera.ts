@@ -54,6 +54,11 @@ export class DungeonCameraController {
   private readonly map: number[][];
   private readonly eyeHeight: number;
 
+  // Stored references for detach()
+  private keyTarget: EventTarget | null = null;
+  private onKeyDown: ((e: Event) => void) | null = null;
+  private onKeyUp: ((e: Event) => void) | null = null;
+
   constructor() {
     this.tileX = DUNGEON_START_X;
     this.tileZ = DUNGEON_START_Z;
@@ -80,34 +85,44 @@ export class DungeonCameraController {
     return this.map[tz][tx] === 0;
   }
 
-  attach(canvas: HTMLCanvasElement): void {
-    window.addEventListener('keydown', (e) => {
-      if (!this.active) return;
-      if (this.keysDown.has(e.code)) return; // ignore repeats
-      this.keysDown.add(e.code);
+  attach(canvas: HTMLCanvasElement, keyboardTarget?: EventTarget): void {
+    this.detach();
+    this.keyTarget = keyboardTarget || window;
 
-      switch (e.code) {
+    this.onKeyDown = (e: Event) => {
+      if (!this.active) return;
+      const code = (e as KeyboardEvent).code;
+      if (this.keysDown.has(code)) return;
+      this.keysDown.add(code);
+
+      switch (code) {
         case 'KeyW':
         case 'KeyA':
         case 'KeyD':
         case 'KeyS':
         case 'KeyQ':
         case 'KeyE':
-          this.pendingActions.push(e.code);
+          this.pendingActions.push(code);
           break;
       }
-    });
+    };
 
-    window.addEventListener('keyup', (e) => {
-      this.keysDown.delete(e.code);
-    });
+    this.onKeyUp = (e: Event) => {
+      this.keysDown.delete((e as KeyboardEvent).code);
+    };
+
+    this.keyTarget.addEventListener('keydown', this.onKeyDown);
+    this.keyTarget.addEventListener('keyup', this.onKeyUp);
   }
 
   detach(): void {
-    // Keys will naturally clear; no persistent listeners to worry about
-    // since the main controller manages which camera is active
+    if (this.keyTarget && this.onKeyDown) {
+      this.keyTarget.removeEventListener('keydown', this.onKeyDown);
+      this.keyTarget.removeEventListener('keyup', this.onKeyUp!);
+    }
     this.keysDown.clear();
     this.pendingActions = [];
+    this.keyTarget = null;
   }
 
   update(deltaTime: number): void {

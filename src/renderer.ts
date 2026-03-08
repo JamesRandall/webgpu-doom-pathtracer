@@ -27,7 +27,7 @@ export class Renderer {
   private walkablePositions: { x: number; z: number }[] | undefined;
 
   // Resolution scale (0.5 = half res, 1.0 = full res, 2.0 = supersampling)
-  public static RESOLUTION_SCALE = 1.0;
+  public resolutionScale = 1.0;
   private static readonly MAX_DENOISE_PASSES = 5;
   private frameCount: number = 0;
   private nodeCount: number = 0;
@@ -123,14 +123,14 @@ export class Renderer {
     this.format = format;
     this.canvasWidth = width;
     this.canvasHeight = height;
-    this.renderWidth = Math.floor(width * Renderer.RESOLUTION_SCALE);
-    this.renderHeight = Math.floor(height * Renderer.RESOLUTION_SCALE);
+    this.renderWidth = Math.floor(width * this.resolutionScale);
+    this.renderHeight = Math.floor(height * this.resolutionScale);
     this.camera = camera;
     this.triangles = triangles;
     this.materials = materials;
     this.textureAtlas = textureAtlas;
     this.walkablePositions = walkablePositions;
-    console.log(`Render resolution: ${this.renderWidth}x${this.renderHeight} (${Renderer.RESOLUTION_SCALE}x scale)`);
+    console.log(`Render resolution: ${this.renderWidth}x${this.renderHeight} (${this.resolutionScale}x scale)`);
   }
 
   async initialize(): Promise<void> {

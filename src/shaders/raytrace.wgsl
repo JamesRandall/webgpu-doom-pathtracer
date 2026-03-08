@@ -737,23 +737,30 @@ fn trace_aabb_wireframe(ray_origin: vec3f, ray_dir: vec3f, target_depth: u32) ->
   return wireframe;
 }
 
-fn compute_debug_color(ray_origin: vec3f, ray_dir: vec3f) -> vec3f {
-  var debug_color = vec3f(0.0);
+struct DebugResult {
+  color: vec3f,
+  wire: f32, // 0.0 = no wireframe, 1.0 = wireframe line
+}
+
+fn compute_debug_color(ray_origin: vec3f, ray_dir: vec3f) -> DebugResult {
+  var result: DebugResult;
+  result.color = vec3f(0.0);
+  result.wire = 0.0;
 
   if (scene_info.debug_mode == 1u) {
     let debug_hit = trace_bvh_debug(ray_origin, ray_dir);
     if (debug_hit.hit.hit) {
-      debug_color = heatmap(f32(debug_hit.nodes_visited), 100.0);
+      result.color = heatmap(f32(debug_hit.nodes_visited), 100.0);
     }
   } else if (scene_info.debug_mode == 2u) {
     let debug_hit = trace_bvh_debug(ray_origin, ray_dir);
     if (debug_hit.hit.hit) {
-      debug_color = heatmap(f32(debug_hit.leaf_depth), 20.0);
+      result.color = heatmap(f32(debug_hit.leaf_depth), 20.0);
     }
   } else if (scene_info.debug_mode == 3u) {
     let debug_hit = trace_bvh_debug(ray_origin, ray_dir);
     if (debug_hit.hit.hit) {
-      debug_color = heatmap(f32(debug_hit.leaf_tri_count), 16.0);
+      result.color = heatmap(f32(debug_hit.leaf_tri_count), 16.0);
     }
   } else if (scene_info.debug_mode == 4u) {
     let debug_hit = trace_bvh_debug(ray_origin, ray_dir);
@@ -765,11 +772,11 @@ fn compute_debug_color(ray_origin: vec3f, ray_dir: vec3f) -> vec3f {
       let ndl = max(dot(n, normalize(vec3f(1.0, 1.0, -1.0))), 0.1);
       base_color = vec3f(ndl * 0.7);
     }
-    let wire = trace_aabb_wireframe(ray_origin, ray_dir, scene_info.debug_depth);
-    debug_color = mix(base_color, vec3f(0.0, 1.0, 0.0), wire);
+    result.wire = trace_aabb_wireframe(ray_origin, ray_dir, scene_info.debug_depth);
+    result.color = mix(base_color, vec3f(0.0, 1.0, 0.0), result.wire);
   }
 
-  return debug_color;
+  return result;
 }
 
 // Path trace a single ray, optionally outputting primary hit info for G-buffer
@@ -989,9 +996,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
     }
     let ray_origin = camera.position;
     let ray_dir = generate_ray(debug_pixel);
-    let debug_color = compute_debug_color(ray_origin, ray_dir);
+    let debug_result = compute_debug_color(ray_origin, ray_dir);
 
-    textureStore(output, global_id.xy, vec4f(debug_color, 0.0));
+    textureStore(output, global_id.xy, vec4f(debug_result.color, 0.0));
     textureStore(output_normal, global_id.xy, vec4f(0.0, 1.0, 0.0, 1.0));
     textureStore(output_depth, global_id.xy, vec4f(1e30, 0.0, 0.0, 0.0));
     return;
@@ -1055,8 +1062,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
     if (scene_info.debug_window > 0u) {
       dbg_pixel = dbg_pixel * vec2f(f32(dims.x), f32(dims.y)) / vec2f(f32(window_size.x), f32(window_size.y));
     }
-    let debug_color = compute_debug_color(camera.position, generate_ray(dbg_pixel));
-    color = mix(color, debug_color, scene_info.debug_opacity);
+    let debug_result = compute_debug_color(camera.position, generate_ray(dbg_pixel));
+    // Wireframe lines stay fully opaque in overlay mode; scene fades at debug_opacity
+    let effective_opacity = max(debug_result.wire, scene_info.debug_opacity);
+    color = mix(color, debug_result.color, effective_opacity);
   }
 
   // Output averaged sample with variance in alpha

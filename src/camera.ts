@@ -14,6 +14,15 @@ export class CameraController {
   private isLocked: boolean = false;
   private collision: CollisionDetector | null = null;
 
+  // Stored references for detach()
+  private canvas: HTMLCanvasElement | null = null;
+  private keyTarget: EventTarget | null = null;
+  private onKeyDown: ((e: Event) => void) | null = null;
+  private onKeyUp: ((e: Event) => void) | null = null;
+  private onClick: (() => void) | null = null;
+  private onPointerLockChange: (() => void) | null = null;
+  private onMouseMove: ((e: Event) => void) | null = null;
+
   constructor(
     position: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 },
     yaw: number = 0,
@@ -34,35 +43,56 @@ export class CameraController {
     this.collision = collision;
   }
 
-  attach(canvas: HTMLCanvasElement): void {
-    // Keyboard events
-    window.addEventListener('keydown', (e) => {
-      this.keys.add(e.code);
-    });
+  attach(canvas: HTMLCanvasElement, keyboardTarget?: EventTarget): void {
+    this.detach();
+    this.canvas = canvas;
+    this.keyTarget = keyboardTarget || window;
 
-    window.addEventListener('keyup', (e) => {
-      this.keys.delete(e.code);
-    });
+    this.onKeyDown = (e: Event) => {
+      this.keys.add((e as KeyboardEvent).code);
+    };
+    this.onKeyUp = (e: Event) => {
+      this.keys.delete((e as KeyboardEvent).code);
+    };
+    this.keyTarget.addEventListener('keydown', this.onKeyDown);
+    this.keyTarget.addEventListener('keyup', this.onKeyUp);
 
-    // Mouse look with pointer lock
-    canvas.addEventListener('click', () => {
-      canvas.requestPointerLock();
-    });
+    this.onClick = () => { canvas.requestPointerLock(); };
+    canvas.addEventListener('click', this.onClick);
 
-    document.addEventListener('pointerlockchange', () => {
+    this.onPointerLockChange = () => {
       this.isLocked = document.pointerLockElement === canvas;
-    });
+    };
+    document.addEventListener('pointerlockchange', this.onPointerLockChange);
 
-    document.addEventListener('mousemove', (e) => {
+    this.onMouseMove = (e: Event) => {
       if (!this.isLocked) return;
-
-      this.yaw -= e.movementX * this.lookSensitivity;
-      this.pitch -= e.movementY * this.lookSensitivity;
-
-      // Clamp pitch to avoid gimbal lock
+      const me = e as MouseEvent;
+      this.yaw -= me.movementX * this.lookSensitivity;
+      this.pitch -= me.movementY * this.lookSensitivity;
       const maxPitch = Math.PI / 2 - 0.01;
       this.pitch = Math.max(-maxPitch, Math.min(maxPitch, this.pitch));
-    });
+    };
+    document.addEventListener('mousemove', this.onMouseMove);
+  }
+
+  detach(): void {
+    if (this.keyTarget && this.onKeyDown) {
+      this.keyTarget.removeEventListener('keydown', this.onKeyDown);
+      this.keyTarget.removeEventListener('keyup', this.onKeyUp!);
+    }
+    if (this.canvas && this.onClick) {
+      this.canvas.removeEventListener('click', this.onClick);
+    }
+    if (this.onPointerLockChange) {
+      document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    }
+    if (this.onMouseMove) {
+      document.removeEventListener('mousemove', this.onMouseMove);
+    }
+    this.keys.clear();
+    this.canvas = null;
+    this.keyTarget = null;
   }
 
   update(deltaTime: number): void {
